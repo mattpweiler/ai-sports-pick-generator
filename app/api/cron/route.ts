@@ -1,4 +1,6 @@
 // app/api/cron/route.ts
+export const runtime = "nodejs";
+
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import crypto from "crypto";
@@ -9,8 +11,9 @@ const DEFAULT_SEASON_TYPE =
   process.env.NBA_SEASON_TYPE || "Regular Season"; // "Regular Season" | "Playoffs" | "Pre Season" | "All Star" | "PlayIn"
 const DEFAULT_RECENT_DAYS = Number(process.env.RECENT_DAYS || 7); // re-sync last N days for stat corrections
 const SLEEP_BETWEEN_GAMES_MS = 1000; // 1s between boxscore calls
-const SLEEP_AFTER_LIST_MS = 2000;    // small pause after fetching game list
+const SLEEP_AFTER_LIST_MS = 2000; // small pause after fetching game list
 const BATCH_SIZE = 500;
+const DEBUG = (process.env.DEBUG || "true").toLowerCase() === "true"; // default on
 
 // ---------------------- Supabase config ----------------------
 const SUPABASE_URL = process.env.SUPABASE_URL!;
@@ -33,9 +36,35 @@ const NBA_HEADERS: Record<string, string> = {
   Connection: "keep-alive",
 };
 
-// ---------------------- Helpers ----------------------
+// ---------------------- Logger ----------------------
+type LogLevel = "INFO" | "WARN" | "ERROR" | "DEBUG";
+const logs: string[] = [];
+function log(level: LogLevel, msg: string, meta?: any) {
+  const line =
+    `[${new Date().toISOString()}] [${level}] ${msg}` +
+    (meta ? ` | ${safeJson(meta)}` : "");
+  logs.push(line);
+  // Always print to console for hosting provider logs
+  if (level === "ERROR") console.error(line);
+  else if (level === "WARN") console.warn(line);
+  else console.log(line);
+}
+function safeJson(v: any) {
+  try {
+    return JSON.stringify(v);
+  } catch {
+    return String(v);
+  }
+}
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+function mask(str?: string, visible = 4) {
+  if (!str) return "";
+  if (str.length <= visible) return "****";
+  return `${str.slice(0, visible)}***`;
+}
+
+// ---------------------- Supabase helper ----------------------
 function supa() {
   const client = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE, {
     auth: { persistSession: false },
@@ -44,6 +73,7 @@ function supa() {
   return client.schema(SUPABASE_SCHEMA);
 }
 
+// ---------------------- Utils ----------------------
 function toISODate(d: Date | string | null | undefined): string | null {
   if (!d) return null;
   const dt = typeof d === "string" ? new Date(d) : d;
@@ -88,8 +118,6 @@ function rowChecksum(row: any): string {
 }
 
 function todayIsoLocalChicago(): string {
-  // If your deployment has TZ=America/Chicago set, new Date() is fine.
-  // Otherwise, this uses Intl to get the local date in Chicago.
   const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone: "America/Chicago",
     year: "numeric",
@@ -114,6 +142,7 @@ async function fetchLeagueGameLog(
   dateFrom: string,
   dateTo: string
 ): Promise<Array<{ game_id: string; game_date: string; matchup: string }>> {
+  const t0 = Date.now();
   const params = new URLSearchParams({
     Season: season,
     SeasonType: seasonType,
@@ -122,12 +151,39 @@ async function fetchLeagueGameLog(
     DateTo: dateTo,
   });
   const url = `https://stats.nba.com/stats/leaguegamelog?${params.toString()}`;
+  log("INFO", "LeagueGameLog fetch start", { url });
 
   const res = await fetch(url, { headers: NBA_HEADERS, cache: "no-store" });
-  if (!res.ok) throw new Error(`LeagueGameLog HTTP ${res.status}`);
-  const json = await res.json();
+  log("INFO", "LeagueGameLog response", {
+    status: res.status,
+    ok: res.ok,
+    took_ms: Date.now() - t0,
+  });
 
-  // Old-style "resultSets" or newer "resultSet" shapes exist.
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    log("ERROR", "LeagueGameLog non-OK", {
+      status: res.status,
+      body_snippet: text?.slice(0, 400),
+    });
+    if (res.status === 403 || res.status === 429) {
+      log(
+        "WARN",
+        "NBA Stats blocked request. Verify runtime=nodejs, headers, and rate limits."
+      );
+    }
+    throw new Error(`LeagueGameLog HTTP ${res.status}`);
+  }
+
+  let json: any;
+  try {
+    json = await res.json();
+  } catch (e) {
+    log("ERROR", "LeagueGameLog JSON parse error", { err: String(e) });
+    throw e;
+  }
+
+  // Old/new shapes
   const rs =
     json?.resultSets?.[0] ||
     json?.resultSet ||
@@ -146,6 +202,11 @@ async function fetchLeagueGameLog(
     rows = set?.rowSet ?? [];
   }
 
+  log("DEBUG", "LeagueGameLog parsed", {
+    headers_len: headers.length,
+    rows_len: rows.length,
+  });
+
   if (!headers.length || !rows.length) return [];
 
   const H = (name: string) => headers.indexOf(name);
@@ -155,7 +216,6 @@ async function fetchLeagueGameLog(
     matchup: String(r[H("MATCHUP")]),
   }));
 
-  // Deduplicate by game_id and sort by date
   const seen = new Set<string>();
   const unique = out.filter((g) => {
     if (seen.has(g.game_id)) return false;
@@ -163,6 +223,10 @@ async function fetchLeagueGameLog(
     return true;
   });
   unique.sort((a, b) => (a.game_date < b.game_date ? -1 : 1));
+  log("INFO", "LeagueGameLog done", {
+    unique_games: unique.length,
+    sample: unique.slice(0, 3),
+  });
   return unique;
 }
 
@@ -170,17 +234,19 @@ type BoxRow = Record<string, any>;
 
 function normalizePlayerBase(dfRows: BoxRow[], gameId: string): BoxRow[] {
   if (!dfRows?.length) return [];
-
-  // Try to detect camelCase vs ALL_CAPS structures
   const cols = new Set(Object.keys(dfRows[0] || {}));
-  const camel = cols.has("personId") || cols.has("firstName") || cols.has("playerSlug");
+  const camel =
+    cols.has("personId") || cols.has("firstName") || cols.has("playerSlug");
 
   const normalized = dfRows.map((row) => {
     if (camel) {
       const player_id = row.personId;
       const first = (row.firstName ?? "").toString().trim();
       const last = (row.familyName ?? "").toString().trim();
-      const player_name = (first || last) ? `${first} ${last}`.trim() : (row.playerSlug ?? "").toString();
+      const player_name =
+        first || last
+          ? `${first} ${last}`.trim()
+          : (row.playerSlug ?? "").toString();
 
       const rec: BoxRow = {
         game_id: gameId,
@@ -212,7 +278,6 @@ function normalizePlayerBase(dfRows: BoxRow[], gameId: string): BoxRow[] {
       };
       return rec;
     } else {
-      // ALL_CAPS variant
       const PLAYER_ID =
         row.PLAYER_ID ?? row.PERSON_ID ?? row.personId ?? row.playerId;
       const TOV =
@@ -250,7 +315,6 @@ function normalizePlayerBase(dfRows: BoxRow[], gameId: string): BoxRow[] {
     }
   });
 
-  // Ensure all expected fields exist
   const needed = [
     "team_abbr",
     "player_id",
@@ -290,32 +354,66 @@ async function fetchBoxscoreTraditionalV3(gameId: string): Promise<BoxRow[]> {
   const params = new URLSearchParams({ GameID: gameId });
   const url = `https://stats.nba.com/stats/boxscoretraditionalv3?${params.toString()}`;
 
-  // retry up to 5x with linear backoff
   for (let attempt = 1; attempt <= 5; attempt++) {
+    const t0 = Date.now();
     try {
+      log("INFO", "BoxV3 fetch start", { gameId, attempt, url });
       const res = await fetch(url, { headers: NBA_HEADERS, cache: "no-store" });
-      if (!res.ok) throw new Error(`BoxV3 HTTP ${res.status}`);
-      const json = await res.json();
+      log("INFO", "BoxV3 response", {
+        gameId,
+        attempt,
+        status: res.status,
+        ok: res.ok,
+        took_ms: Date.now() - t0,
+      });
 
-      // Try to locate the "player stats" table
+      if (!res.ok) {
+        const body = await res.text().catch(() => "");
+        log("WARN", "BoxV3 non-OK", {
+          gameId,
+          status: res.status,
+          body_snippet: body?.slice(0, 300),
+        });
+        if (res.status === 403 || res.status === 429) {
+          log(
+            "WARN",
+            "NBA Stats blocked request. Ensure runtime=nodejs and avoid aggressive concurrency."
+          );
+        }
+        throw new Error(`BoxV3 HTTP ${res.status}`);
+      }
+
+      let json: any;
+      try {
+        json = await res.json();
+      } catch (e) {
+        log("ERROR", "BoxV3 JSON parse error", { gameId, err: String(e) });
+        throw e;
+      }
+
       const sets: any[] =
         json?.boxScoreTraditional?.playerStats ??
         json?.resultSets ??
         json?.ResultSets ??
         [];
 
-      // Newer v3 provides a direct array of playerStats objects
       if (Array.isArray(json?.boxScoreTraditional?.playerStats)) {
-        return json.boxScoreTraditional.playerStats as BoxRow[];
+        const rows = json.boxScoreTraditional.playerStats as BoxRow[];
+        log("DEBUG", "BoxV3 playerStats array", { gameId, rows_len: rows.length });
+        return rows;
       }
 
-      // Fallback to classic resultSets with headers/rowSet
       const candidate =
         sets.find((s: any) => s.name?.toLowerCase?.().includes("player")) ||
         sets[0];
 
       if (candidate?.headers && candidate?.rowSet) {
         const { headers, rowSet } = candidate;
+        log("DEBUG", "BoxV3 resultSets", {
+          gameId,
+          headers_len: headers?.length ?? 0,
+          rows_len: rowSet?.length ?? 0,
+        });
         return rowSet.map((row: any[]) =>
           headers.reduce((acc: any, h: string, idx: number) => {
             acc[h] = row[idx];
@@ -324,20 +422,21 @@ async function fetchBoxscoreTraditionalV3(gameId: string): Promise<BoxRow[]> {
         );
       }
 
-      // Last resort: if shape unknown, return empty
+      log("WARN", "BoxV3 unknown shape", { gameId });
       return [];
     } catch (err) {
       if (attempt === 5) {
-        console.error(`❌ V3 failed for ${gameId} after retries:`, err);
+        log("ERROR", "BoxV3 failed after retries", { gameId, err: String(err) });
         return [];
       }
-      console.warn(`⚠️ ${gameId}: retry ${attempt}...`, err);
+      log("WARN", "BoxV3 retrying", { gameId, attempt, err: String(err) });
       await sleep(1000 * attempt);
     }
   }
   return [];
 }
 
+// ---------------------- Supabase ops ----------------------
 async function supabaseDistinctGameIds(
   table: string,
   gameIds: string[]
@@ -346,16 +445,31 @@ async function supabaseDistinctGameIds(
   const present = new Set<string>();
   const CHUNK = 200;
 
+  log("INFO", "Supabase IN check start", {
+    table,
+    gameIds_len: gameIds.length,
+    chunk_size: CHUNK,
+  });
+
   for (let i = 0; i < gameIds.length; i += CHUNK) {
     const chunk = gameIds.slice(i, i + CHUNK);
     const inList = `(${chunk.map((g) => `"${g}"`).join(",")})`;
+    const t0 = Date.now();
     const { data, error } = await sb
       .from(table)
       .select("game_id", { count: "exact", head: false })
       .filter("game_id", "in", inList);
 
+    log("DEBUG", "Supabase IN chunk result", {
+      i,
+      chunk_len: chunk.length,
+      took_ms: Date.now() - t0,
+      error: error ? String(error.message || error) : null,
+      data_len: data?.length ?? 0,
+    });
+
     if (error) {
-      console.error("Supabase select error:", error);
+      log("ERROR", "Supabase select error", { error: String(error.message || error) });
       throw error;
     }
     (data || []).forEach((r: any) => {
@@ -363,16 +477,20 @@ async function supabaseDistinctGameIds(
     });
     await sleep(100);
   }
+
+  log("INFO", "Supabase IN check done", { present_len: present.size });
   return present;
 }
 
 async function upsertRows(table: string, rows: any[]) {
   if (!rows.length) return;
   const sb = supa();
+  const totalBatches = Math.ceil(rows.length / BATCH_SIZE);
+  log("INFO", "Upsert start", { rows_len: rows.length, batch_size: BATCH_SIZE, totalBatches });
 
   for (let i = 0; i < rows.length; i += BATCH_SIZE) {
+    const batchIndex = i / BATCH_SIZE + 1;
     const batch = rows.slice(i, i + BATCH_SIZE).map((r) => {
-      // Strip fields your table might not have; keep only columns you know exist
       const allowed = {
         game_id: r.game_id,
         player_id: r.player_id,
@@ -408,37 +526,65 @@ async function upsertRows(table: string, rows: any[]) {
       return allowed;
     });
 
+    const t0 = Date.now();
     const { error } = await sb
       .from(table)
       .upsert(batch, { onConflict: "game_id,player_id", ignoreDuplicates: false });
 
+    log("INFO", "Upsert batch result", {
+      batchIndex,
+      batch_len: batch.length,
+      took_ms: Date.now() - t0,
+      error: error ? String(error.message || error) : null,
+    });
+
     if (error) {
-      console.error("Supabase upsert error:", error);
+      log("ERROR", "Supabase upsert error", {
+        batchIndex,
+        error: String(error.message || error),
+      });
       throw error;
     }
   }
+
+  log("INFO", "Upsert done");
 }
 
 // ---------------------- GET (Cron) ----------------------
 export async function GET() {
   const startedAt = new Date().toISOString();
 
+  // Log env summary (masked)
+  log("INFO", "Env summary", {
+    SUPABASE_URL: SUPABASE_URL,
+    SUPABASE_SERVICE_ROLE: mask(SUPABASE_SERVICE_ROLE),
+    SUPABASE_SCHEMA,
+    SUPABASE_TABLE,
+    DEFAULT_SEASON,
+    DEFAULT_SEASON_TYPE,
+    DEFAULT_RECENT_DAYS,
+    runtime,
+  });
+
   if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE) {
+    log("ERROR", "Missing Supabase envs");
     return NextResponse.json(
-      { ok: false, error: "Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE" },
+      { ok: false, error: "Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE", logs },
       { status: 500 }
     );
   }
 
   try {
-    // Default rolling 10-day window in America/Chicago
     const todayLocal = todayIsoLocalChicago();
     const dateFrom = addDaysISO(todayLocal, -10);
     const dateTo = todayLocal;
 
-    console.log(
-      `→ Enumerating games ${DEFAULT_SEASON} — ${DEFAULT_SEASON_TYPE} between ${dateFrom} and ${dateTo} …`
-    );
+    log("INFO", "Date window (local Chicago)", { todayLocal, dateFrom, dateTo });
+
+    log("INFO", "LeagueGameLog enumerate start", {
+      season: DEFAULT_SEASON,
+      seasonType: DEFAULT_SEASON_TYPE,
+    });
     const games = await fetchLeagueGameLog(
       DEFAULT_SEASON,
       DEFAULT_SEASON_TYPE,
@@ -447,15 +593,16 @@ export async function GET() {
     );
 
     if (!games.length) {
+      log("INFO", "No games in range; exit.");
       return NextResponse.json({
         ok: true,
         startedAt,
         finishedAt: new Date().toISOString(),
         message: "No games in range; exiting.",
+        logs,
       });
     }
 
-    // recent cutoff (UTC today - N days)
     const todayUtc = new Date();
     const recentCutoff = new Date(
       Date.UTC(
@@ -465,9 +612,15 @@ export async function GET() {
       )
     );
     recentCutoff.setUTCDate(recentCutoff.getUTCDate() - DEFAULT_RECENT_DAYS);
+    log("INFO", "Recent cutoff (UTC)", { recentCutoff: recentCutoff.toISOString() });
 
     const gameIds = games.map((g) => g.game_id);
-    console.log(`→ Checking Supabase for existing rows in ${SUPABASE_SCHEMA}.${SUPABASE_TABLE} …`);
+    log("INFO", "Supabase existing rows check …", {
+      schema: SUPABASE_SCHEMA,
+      table: SUPABASE_TABLE,
+      total_gameIds: gameIds.length,
+      sample: gameIds.slice(0, 5),
+    });
     const present = await supabaseDistinctGameIds(SUPABASE_TABLE, gameIds);
 
     const missing = new Set(gameIds.filter((g) => !present.has(g)));
@@ -481,16 +634,21 @@ export async function GET() {
     );
     const targets = Array.from(new Set([...missing, ...recent])).sort();
 
-    console.log(
-      `  Missing games: ${missing.size}; Recent for refresh: ${recent.size}; Total to fetch: ${targets.length}`
-    );
+    log("INFO", "Target sets computed", {
+      missing: missing.size,
+      recent: recent.size,
+      targets: targets.length,
+      sample_targets: targets.slice(0, 10),
+    });
 
     if (!targets.length) {
+      log("INFO", "Nothing to fetch; exit.");
       return NextResponse.json({
         ok: true,
         startedAt,
         finishedAt: new Date().toISOString(),
         message: "Nothing to fetch.",
+        logs,
       });
     }
 
@@ -498,27 +656,27 @@ export async function GET() {
 
     let totalRows = 0;
     const toUpsert: any[] = [];
-
-    // quick lookup of date/matchup
-    const metaById = games.reduce<Record<string, { game_date: string; matchup: string }>>(
-      (acc, g) => {
-        acc[g.game_id] = { game_date: g.game_date, matchup: g.matchup };
-        return acc;
-      },
-      {}
-    );
+    const metaById = games.reduce<
+      Record<string, { game_date: string; matchup: string }>
+    >((acc, g) => {
+      acc[g.game_id] = { game_date: g.game_date, matchup: g.matchup };
+      return acc;
+    }, {});
 
     for (let i = 0; i < targets.length; i++) {
       const gid = targets[i];
       try {
+        log("INFO", "Fetch boxscore start", { index: i + 1, of: targets.length, gid });
         const raw = await fetchBoxscoreTraditionalV3(gid);
+        log("INFO", "Fetch boxscore done", { gid, raw_len: raw.length });
+
         const norm = normalizePlayerBase(raw, gid);
+        log("INFO", "Normalize done", { gid, norm_len: norm.length });
 
         if (norm.length) {
           const meta = metaById[gid] || {};
           const game_date = meta.game_date ?? null;
           const matchup = meta.matchup ?? null;
-
           const nowIso = new Date().toISOString();
 
           for (const r of norm) {
@@ -530,43 +688,59 @@ export async function GET() {
           }
           totalRows += norm.length;
         }
-      } catch (e) {
-        console.error(`[${i + 1}/${targets.length}] ${gid}:`, e);
+      } catch (e: any) {
+        log("ERROR", "Per-game error", { gid, err: String(e?.message ?? e) });
       }
 
-      if ((i + 1) % 10 === 0) {
-        console.log(
-          `  … ${i + 1}/${targets.length} games processed, ${totalRows} rows buffered`
-        );
+      if ((i + 1) % 5 === 0) {
+        log("INFO", "Progress", {
+          processed: i + 1,
+          total: targets.length,
+          buffered_rows: totalRows,
+        });
       }
       await sleep(SLEEP_BETWEEN_GAMES_MS);
     }
 
     if (!toUpsert.length) {
+      log("INFO", "No rows to upsert; exit.");
       return NextResponse.json({
         ok: true,
         startedAt,
         finishedAt: new Date().toISOString(),
         message: "No rows to upsert.",
+        logs,
       });
     }
 
-    console.log(
-      `→ Upserting ${toUpsert.length} rows into ${SUPABASE_SCHEMA}.${SUPABASE_TABLE} …`
-    );
+    log("INFO", "Upserting rows …", {
+      schema: SUPABASE_SCHEMA,
+      table: SUPABASE_TABLE,
+      rows: toUpsert.length,
+      gamesProcessed: targets.length,
+    });
     await upsertRows(SUPABASE_TABLE, toUpsert);
 
+    log("INFO", "Cron complete", {
+      upserted: toUpsert.length,
+      gamesProcessed: targets.length,
+    });
+
+    // Return the last ~200 log lines to keep payload sane
+    const tail = logs.slice(-200);
     return NextResponse.json({
       ok: true,
       startedAt,
       finishedAt: new Date().toISOString(),
       upserted: toUpsert.length,
       gamesProcessed: targets.length,
+      logs: tail,
     });
   } catch (err: any) {
-    console.error("Cron error:", err);
+    log("ERROR", "Cron top-level error", { err: String(err?.message ?? err) });
+    const tail = logs.slice(-200);
     return NextResponse.json(
-      { ok: false, error: String(err?.message ?? err) },
+      { ok: false, error: String(err?.message ?? err), logs: tail },
       { status: 500 }
     );
   }

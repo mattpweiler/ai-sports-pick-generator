@@ -9,11 +9,10 @@ import crypto from "crypto";
 const DEFAULT_SEASON = process.env.NBA_SEASON || "2025-26";
 const DEFAULT_SEASON_TYPE =
   process.env.NBA_SEASON_TYPE || "Regular Season"; // "Regular Season" | "Playoffs" | "Pre Season" | "All Star" | "PlayIn"
-const DEFAULT_RECENT_DAYS = Number(process.env.RECENT_DAYS || 7); // re-sync last N days for stat corrections
-const SLEEP_BETWEEN_GAMES_MS = 1000; // 1s between boxscore calls
-const SLEEP_AFTER_LIST_MS = 2000; // small pause after fetching game list
+const DEFAULT_RECENT_DAYS = Number(process.env.RECENT_DAYS || 7);
+const SLEEP_BETWEEN_GAMES_MS = 1000;
+const SLEEP_AFTER_LIST_MS = 2000;
 const BATCH_SIZE = 500;
-const DEBUG = (process.env.DEBUG || "true").toLowerCase() === "true"; // default on
 
 // ---------------------- Supabase config ----------------------
 const SUPABASE_URL = process.env.SUPABASE_URL!;
@@ -44,7 +43,6 @@ function log(level: LogLevel, msg: string, meta?: any) {
     `[${new Date().toISOString()}] [${level}] ${msg}` +
     (meta ? ` | ${safeJson(meta)}` : "");
   logs.push(line);
-  // Always print to console for hosting provider logs
   if (level === "ERROR") console.error(line);
   else if (level === "WARN") console.warn(line);
   else console.log(line);
@@ -57,7 +55,6 @@ function safeJson(v: any) {
   }
 }
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-
 function mask(str?: string, visible = 4) {
   if (!str) return "";
   if (str.length <= visible) return "****";
@@ -69,7 +66,7 @@ function supa() {
   const client = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE, {
     auth: { persistSession: false },
   });
-  // @ts-ignore: .schema exists in supabase-js v2
+  // @ts-ignore: schema() is available in supabase-js v2
   return client.schema(SUPABASE_SCHEMA);
 }
 
@@ -80,11 +77,9 @@ function toISODate(d: Date | string | null | undefined): string | null {
   if (isNaN(dt.getTime())) return null;
   return dt.toISOString().slice(0, 10);
 }
-
 function sha256(text: string) {
   return crypto.createHash("sha256").update(text, "utf8").digest("hex");
 }
-
 function rowChecksum(row: any): string {
   const keys = [
     "team_abbr",
@@ -116,7 +111,6 @@ function rowChecksum(row: any): string {
   const s = keys.map((k) => String(row?.[k] ?? "")).join("|");
   return sha256(s);
 }
-
 function todayIsoLocalChicago(): string {
   const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone: "America/Chicago",
@@ -128,21 +122,55 @@ function todayIsoLocalChicago(): string {
     .reduce((acc: any, p) => ((acc[p.type] = p.value), acc), {});
   return `${parts.year}-${parts.month}-${parts.day}`; // YYYY-MM-DD
 }
-
 function addDaysISO(iso: string, delta: number) {
   const d = new Date(iso + "T00:00:00Z");
   d.setUTCDate(d.getUTCDate() + delta);
   return d.toISOString().slice(0, 10);
 }
 
-// ---------------------- NBA fetchers ----------------------
+// ---------------------- Fetch wrapper with timeout ----------------------
+async function fetchJson(
+  url: string,
+  opts: RequestInit & { timeoutMs?: number } = {}
+) {
+  const { timeoutMs = 15000, ...rest } = opts; // 15s default
+  const controller = new AbortController();
+  const t0 = Date.now();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  log("INFO", "HTTP fetch start", { url, timeoutMs });
+
+  try {
+    const res = await fetch(url, { ...rest, signal: controller.signal });
+    const took = Date.now() - t0;
+    log("INFO", "HTTP response", { url, status: res.status, ok: res.ok, took_ms: took });
+
+    if (!res.ok) {
+      const bodySnippet = await res.text().then(t => t.slice(0, 400)).catch(() => "");
+      log("WARN", "HTTP non-OK", { url, status: res.status, body_snippet: bodySnippet });
+      if (res.status === 403 || res.status === 429) {
+        log("WARN", "Likely blocked/throttled by NBA Stats. Check headers/runtime and pacing.");
+      }
+      throw new Error(`HTTP ${res.status}`);
+    }
+
+    const json = await res.json();
+    return json;
+  } catch (err: any) {
+    const took = Date.now() - t0;
+    log("ERROR", "HTTP fetch error", { url, took_ms: took, err: String(err?.message ?? err) });
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// ---------------------- NBA fetchers (stats.nba.com only) ----------------------
 async function fetchLeagueGameLog(
   season: string,
   seasonType: string,
   dateFrom: string,
   dateTo: string
 ): Promise<Array<{ game_id: string; game_date: string; matchup: string }>> {
-  const t0 = Date.now();
   const params = new URLSearchParams({
     Season: season,
     SeasonType: seasonType,
@@ -151,39 +179,12 @@ async function fetchLeagueGameLog(
     DateTo: dateTo,
   });
   const url = `https://stats.nba.com/stats/leaguegamelog?${params.toString()}`;
-  log("INFO", "LeagueGameLog fetch start", { url });
-
-  const res = await fetch(url, { headers: NBA_HEADERS, cache: "no-store" });
-  log("INFO", "LeagueGameLog response", {
-    status: res.status,
-    ok: res.ok,
-    took_ms: Date.now() - t0,
+  const json = await fetchJson(url, {
+    headers: NBA_HEADERS,
+    cache: "no-store",
+    timeoutMs: 15000,
   });
 
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    log("ERROR", "LeagueGameLog non-OK", {
-      status: res.status,
-      body_snippet: text?.slice(0, 400),
-    });
-    if (res.status === 403 || res.status === 429) {
-      log(
-        "WARN",
-        "NBA Stats blocked request. Verify runtime=nodejs, headers, and rate limits."
-      );
-    }
-    throw new Error(`LeagueGameLog HTTP ${res.status}`);
-  }
-
-  let json: any;
-  try {
-    json = await res.json();
-  } catch (e) {
-    log("ERROR", "LeagueGameLog JSON parse error", { err: String(e) });
-    throw e;
-  }
-
-  // Old/new shapes
   const rs =
     json?.resultSets?.[0] ||
     json?.resultSet ||
@@ -232,8 +233,71 @@ async function fetchLeagueGameLog(
 
 type BoxRow = Record<string, any>;
 
+async function fetchBoxscoreTraditionalV3(gameId: string): Promise<BoxRow[]> {
+  const params = new URLSearchParams({ GameID: gameId });
+  const url = `https://stats.nba.com/stats/boxscoretraditionalv3?${params.toString()}`;
+
+  for (let attempt = 1; attempt <= 5; attempt++) {
+    try {
+      log("INFO", "BoxV3 fetch start", { gameId, attempt, url });
+      const json = await fetchJson(url, {
+        headers: NBA_HEADERS,
+        cache: "no-store",
+        timeoutMs: 15000,
+      });
+
+      const sets: any[] =
+        json?.boxScoreTraditional?.playerStats ??
+        json?.resultSets ??
+        json?.ResultSets ??
+        [];
+
+      if (Array.isArray(json?.boxScoreTraditional?.playerStats)) {
+        const rows = json.boxScoreTraditional.playerStats as BoxRow[];
+        log("DEBUG", "BoxV3 playerStats array", {
+          gameId,
+          rows_len: rows.length,
+        });
+        return rows;
+      }
+
+      const candidate =
+        sets.find((s: any) => s.name?.toLowerCase?.().includes("player")) ||
+        sets[0];
+
+      if (candidate?.headers && candidate?.rowSet) {
+        const { headers, rowSet } = candidate;
+        log("DEBUG", "BoxV3 resultSets", {
+          gameId,
+          headers_len: headers?.length ?? 0,
+          rows_len: rowSet?.length ?? 0,
+        });
+        return rowSet.map((row: any[]) =>
+          headers.reduce((acc: any, h: string, idx: number) => {
+            acc[h] = row[idx];
+            return acc;
+          }, {})
+        );
+      }
+
+      log("WARN", "BoxV3 unknown shape", { gameId });
+      return [];
+    } catch (err) {
+      if (attempt === 5) {
+        log("ERROR", "BoxV3 failed after retries", { gameId, err: String(err) });
+        return [];
+      }
+      log("WARN", "BoxV3 retrying", { gameId, attempt, err: String(err) });
+      await sleep(1000 * attempt);
+    }
+  }
+  return [];
+}
+
+// ---------------------- Normalizer ----------------------
 function normalizePlayerBase(dfRows: BoxRow[], gameId: string): BoxRow[] {
   if (!dfRows?.length) return [];
+
   const cols = new Set(Object.keys(dfRows[0] || {}));
   const camel =
     cols.has("personId") || cols.has("firstName") || cols.has("playerSlug");
@@ -350,92 +414,6 @@ function normalizePlayerBase(dfRows: BoxRow[], gameId: string): BoxRow[] {
   });
 }
 
-async function fetchBoxscoreTraditionalV3(gameId: string): Promise<BoxRow[]> {
-  const params = new URLSearchParams({ GameID: gameId });
-  const url = `https://stats.nba.com/stats/boxscoretraditionalv3?${params.toString()}`;
-
-  for (let attempt = 1; attempt <= 5; attempt++) {
-    const t0 = Date.now();
-    try {
-      log("INFO", "BoxV3 fetch start", { gameId, attempt, url });
-      const res = await fetch(url, { headers: NBA_HEADERS, cache: "no-store" });
-      log("INFO", "BoxV3 response", {
-        gameId,
-        attempt,
-        status: res.status,
-        ok: res.ok,
-        took_ms: Date.now() - t0,
-      });
-
-      if (!res.ok) {
-        const body = await res.text().catch(() => "");
-        log("WARN", "BoxV3 non-OK", {
-          gameId,
-          status: res.status,
-          body_snippet: body?.slice(0, 300),
-        });
-        if (res.status === 403 || res.status === 429) {
-          log(
-            "WARN",
-            "NBA Stats blocked request. Ensure runtime=nodejs and avoid aggressive concurrency."
-          );
-        }
-        throw new Error(`BoxV3 HTTP ${res.status}`);
-      }
-
-      let json: any;
-      try {
-        json = await res.json();
-      } catch (e) {
-        log("ERROR", "BoxV3 JSON parse error", { gameId, err: String(e) });
-        throw e;
-      }
-
-      const sets: any[] =
-        json?.boxScoreTraditional?.playerStats ??
-        json?.resultSets ??
-        json?.ResultSets ??
-        [];
-
-      if (Array.isArray(json?.boxScoreTraditional?.playerStats)) {
-        const rows = json.boxScoreTraditional.playerStats as BoxRow[];
-        log("DEBUG", "BoxV3 playerStats array", { gameId, rows_len: rows.length });
-        return rows;
-      }
-
-      const candidate =
-        sets.find((s: any) => s.name?.toLowerCase?.().includes("player")) ||
-        sets[0];
-
-      if (candidate?.headers && candidate?.rowSet) {
-        const { headers, rowSet } = candidate;
-        log("DEBUG", "BoxV3 resultSets", {
-          gameId,
-          headers_len: headers?.length ?? 0,
-          rows_len: rowSet?.length ?? 0,
-        });
-        return rowSet.map((row: any[]) =>
-          headers.reduce((acc: any, h: string, idx: number) => {
-            acc[h] = row[idx];
-            return acc;
-          }, {})
-        );
-      }
-
-      log("WARN", "BoxV3 unknown shape", { gameId });
-      return [];
-    } catch (err) {
-      if (attempt === 5) {
-        log("ERROR", "BoxV3 failed after retries", { gameId, err: String(err) });
-        return [];
-      }
-      log("WARN", "BoxV3 retrying", { gameId, attempt, err: String(err) });
-      await sleep(1000 * attempt);
-    }
-  }
-  return [];
-}
-
 // ---------------------- Supabase ops ----------------------
 async function supabaseDistinctGameIds(
   table: string,
@@ -457,7 +435,7 @@ async function supabaseDistinctGameIds(
     const t0 = Date.now();
     const { data, error } = await sb
       .from(table)
-      .select("game_id", { count: "exact", head: false })
+      .select("game_id")
       .filter("game_id", "in", inList);
 
     log("DEBUG", "Supabase IN chunk result", {
@@ -486,7 +464,11 @@ async function upsertRows(table: string, rows: any[]) {
   if (!rows.length) return;
   const sb = supa();
   const totalBatches = Math.ceil(rows.length / BATCH_SIZE);
-  log("INFO", "Upsert start", { rows_len: rows.length, batch_size: BATCH_SIZE, totalBatches });
+  log("INFO", "Upsert start", {
+    rows_len: rows.length,
+    batch_size: BATCH_SIZE,
+    totalBatches,
+  });
 
   for (let i = 0; i < rows.length; i += BATCH_SIZE) {
     const batchIndex = i / BATCH_SIZE + 1;
@@ -529,7 +511,10 @@ async function upsertRows(table: string, rows: any[]) {
     const t0 = Date.now();
     const { error } = await sb
       .from(table)
-      .upsert(batch, { onConflict: "game_id,player_id", ignoreDuplicates: false });
+      .upsert(batch, {
+        onConflict: "game_id,player_id",
+        ignoreDuplicates: false,
+      });
 
     log("INFO", "Upsert batch result", {
       batchIndex,
@@ -554,20 +539,18 @@ async function upsertRows(table: string, rows: any[]) {
 export async function GET() {
   const startedAt = new Date().toISOString();
 
-  // Log env summary (masked)
+  // Log env summary (masked secret)
   log("INFO", "Env summary", {
-    SUPABASE_URL: SUPABASE_URL,
+    SUPABASE_URL,
     SUPABASE_SERVICE_ROLE: mask(SUPABASE_SERVICE_ROLE),
     SUPABASE_SCHEMA,
     SUPABASE_TABLE,
     DEFAULT_SEASON,
     DEFAULT_SEASON_TYPE,
     DEFAULT_RECENT_DAYS,
-    runtime,
   });
 
   if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE) {
-    log("ERROR", "Missing Supabase envs");
     return NextResponse.json(
       { ok: false, error: "Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE", logs },
       { status: 500 }
@@ -575,11 +558,11 @@ export async function GET() {
   }
 
   try {
+    // Rolling 10-day window in America/Chicago
     const todayLocal = todayIsoLocalChicago();
     const dateFrom = addDaysISO(todayLocal, -10);
     const dateTo = todayLocal;
-
-    log("INFO", "Date window (local Chicago)", { todayLocal, dateFrom, dateTo });
+    log("INFO", "Date window (Chicago)", { todayLocal, dateFrom, dateTo });
 
     log("INFO", "LeagueGameLog enumerate start", {
       season: DEFAULT_SEASON,
@@ -603,6 +586,7 @@ export async function GET() {
       });
     }
 
+    // recent cutoff (UTC today - N days)
     const todayUtc = new Date();
     const recentCutoff = new Date(
       Date.UTC(
@@ -612,7 +596,7 @@ export async function GET() {
       )
     );
     recentCutoff.setUTCDate(recentCutoff.getUTCDate() - DEFAULT_RECENT_DAYS);
-    log("INFO", "Recent cutoff (UTC)", { recentCutoff: recentCutoff.toISOString() });
+    log("INFO", "Recent cutoff (UTC)", { iso: recentCutoff.toISOString() });
 
     const gameIds = games.map((g) => g.game_id);
     log("INFO", "Supabase existing rows check …", {
@@ -656,17 +640,24 @@ export async function GET() {
 
     let totalRows = 0;
     const toUpsert: any[] = [];
-    const metaById = games.reduce<
-      Record<string, { game_date: string; matchup: string }>
-    >((acc, g) => {
-      acc[g.game_id] = { game_date: g.game_date, matchup: g.matchup };
-      return acc;
-    }, {});
+
+    // quick lookup of date/matchup
+    const metaById = games.reduce<Record<string, { game_date: string; matchup: string }>>(
+      (acc, g) => {
+        acc[g.game_id] = { game_date: g.game_date, matchup: g.matchup };
+        return acc;
+      },
+      {}
+    );
 
     for (let i = 0; i < targets.length; i++) {
       const gid = targets[i];
       try {
-        log("INFO", "Fetch boxscore start", { index: i + 1, of: targets.length, gid });
+        log("INFO", "Fetch boxscore start", {
+          index: i + 1,
+          of: targets.length,
+          gid,
+        });
         const raw = await fetchBoxscoreTraditionalV3(gid);
         log("INFO", "Fetch boxscore done", { gid, raw_len: raw.length });
 
@@ -677,6 +668,7 @@ export async function GET() {
           const meta = metaById[gid] || {};
           const game_date = meta.game_date ?? null;
           const matchup = meta.matchup ?? null;
+
           const nowIso = new Date().toISOString();
 
           for (const r of norm) {
@@ -721,12 +713,6 @@ export async function GET() {
     });
     await upsertRows(SUPABASE_TABLE, toUpsert);
 
-    log("INFO", "Cron complete", {
-      upserted: toUpsert.length,
-      gamesProcessed: targets.length,
-    });
-
-    // Return the last ~200 log lines to keep payload sane
     const tail = logs.slice(-200);
     return NextResponse.json({
       ok: true,
@@ -737,7 +723,6 @@ export async function GET() {
       logs: tail,
     });
   } catch (err: any) {
-    log("ERROR", "Cron top-level error", { err: String(err?.message ?? err) });
     const tail = logs.slice(-200);
     return NextResponse.json(
       { ok: false, error: String(err?.message ?? err), logs: tail },

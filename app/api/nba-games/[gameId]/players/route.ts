@@ -7,151 +7,101 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE!
 );
 
-const GAMES_TABLE = "nba_games-2025-26";
-const PLAYERS_TABLE = "player_team_position";
-const TEAMS_TABLE = "team_id_to_team"; // adjust if named differently
+const PERGAME_TABLE = "pergame_player_base_stats_2025_26";
 
-type Player = {
+type RawRow = {
+  game_id: number;
+  team_abbr: string | null;
   player_id: number;
-  player_name: string;
-  team: string;
-  active_status: number;
-  position: string | null;
+  player_name: string | null;
+  start_pos: string | null;
+  min: string | null;
+  oreb: string | null;
+  dreb: string | null;
+  reb: string | null;
+  ast: number | null;
+  stl: number | null;
+  blk: string | null;
+  tov: number | null;
+  pf: number | null;
+  pts: number | null;
 };
-
-async function returnPlayersByTeam(
-  teams: string[]
-): Promise<{ players: Player[]; error?: string }> {
-  if (!teams.length) return { players: [], error: "No teams supplied" };
-
-  const { data, error } = await supabase
-    .from(PLAYERS_TABLE)
-    .select("*")
-    .in("team", teams)
-    .eq("active_status", 1);
-
-  if (error) {
-    console.error("returnPlayersByTeam error:", error);
-    return { players: [], error: error.message };
-  }
-
-  return { players: (data as Player[]) ?? [] };
-}
 
 export async function GET(
   req: NextRequest,
-  { params }: { params: Promise<{ gameId?: string }> }
+  { params }: { params: Promise<{ gameId: string }> }
 ) {
   try {
-    const { gameId: gameIdStr } = await params;
-    if (!gameIdStr) {
+    const { gameId } = await params;
+    if (!gameId) {
       return NextResponse.json(
-        { error: "Missing gameId in route params" },
+        { error: "Missing gameId" },
         { status: 400 }
       );
     }
-
-    const gameId = Number(gameIdStr);
-    if (Number.isNaN(gameId)) {
+    const gameIdNum = Number(gameId);
+    if (Number.isNaN(gameIdNum)) {
       return NextResponse.json({ error: "Invalid gameId" }, { status: 400 });
     }
 
-    // 1. Get team IDs for this game
-    const { data: game, error: gameError } = await supabase
-      .from(GAMES_TABLE)
-      .select("home_team_id, away_team_id")
-      .eq("game_id", gameId)
-      .single();
+    const { data, error } = await supabase
+      .from(PERGAME_TABLE)
+      .select(
+        `
+        game_id,
+        team_abbr,
+        player_id,
+        player_name,
+        start_pos,
+        min,
+        oreb,
+        dreb,
+        reb,
+        ast,
+        stl,
+        blk,
+        tov,
+        pf,
+        pts
+      `
+      )
+      .eq("game_id", gameIdNum)
+      .order("team_abbr", { ascending: true })
+      .order("player_name", { ascending: true });
 
-    if (gameError || !game) {
-      console.error(
-        "[nba-games players] Failed to fetch game",
-        JSON.stringify({ gameId, error: gameError }, null, 2)
-      );
-      return NextResponse.json({ error: "Game not found" }, { status: 404 });
-    }
-
-    // 2. Map IDs → team abbreviations via team_id_to_team
-    // Adjust column names if your table uses something different
-    const {
-      data: homeTeamRow,
-      error: homeTeamError,
-    } = await supabase
-      .from(TEAMS_TABLE)
-      .select("team_abbrev")
-      .eq("team_id", game.home_team_id)
-      .single();
-
-    if (homeTeamError) {
-      console.error(
-        "[nba-games players] Failed to fetch home team",
-        JSON.stringify(
-          { teamId: game.home_team_id, error: homeTeamError },
-          null,
-          2
-        )
-      );
-    }
-
-    const {
-      data: awayTeamRow,
-      error: awayTeamError,
-    } = await supabase
-      .from(TEAMS_TABLE)
-      .select("team_abbrev")
-      .eq("team_id", game.away_team_id)
-      .single();
-
-    if (awayTeamError) {
-      console.error(
-        "[nba-games players] Failed to fetch away team",
-        JSON.stringify(
-          { teamId: game.away_team_id, error: awayTeamError },
-          null,
-          2
-        )
-      );
-    }
-
-    const homeAbbrev = homeTeamRow?.team_abbrev;
-    const awayAbbrev = awayTeamRow?.team_abbrev;
-
-    if (!homeAbbrev || !awayAbbrev) {
-      console.error(
-        "[nba-games players] Missing team abbreviations",
-        JSON.stringify(
-          {
-            gameId,
-            homeTeamId: game.home_team_id,
-            awayTeamId: game.away_team_id,
-            homeAbbrev,
-            awayAbbrev,
-          },
-          null,
-          2
-        )
-      );
+    if (error) {
+      console.error("Supabase error fetching players for game:", error);
       return NextResponse.json(
-        { error: "Could not resolve team abbreviations" },
+        { error: "Failed to fetch players." },
         { status: 500 }
       );
     }
 
-    // 3. Look up players by team abbrev
-    const { players, error } = await returnPlayersByTeam([
-      homeAbbrev,
-      awayAbbrev,
-    ]);
+    const raw = (data ?? []) as RawRow[];
 
-    if (error) {
-      return NextResponse.json({ players: [], error }, { status: 500 });
-    }
+    const players = raw.map((row) => ({
+      game_id: row.game_id,
+      team_abbr: row.team_abbr,
+      player_id: row.player_id,
+      player_name: row.player_name,
+      start_pos: row.start_pos,
+      min: row.min,
+      oreb: row.oreb,
+      dreb: row.dreb,
+      reb: row.reb,
+      ast: row.ast,
+      stl: row.stl,
+      blk: row.blk,
+      tov: row.tov,
+      pf: row.pf,
+      pts: row.pts,
+    }));
 
     return NextResponse.json({ players });
   } catch (err) {
     console.error(
-      "[nba-games players] Unexpected error",
-      err instanceof Error ? err.stack ?? err.message : err
+      "Unexpected error in GET /api/nba-games/[gameId]/players:",
+      err
     );
     return NextResponse.json(
       { error: "Unexpected server error" },

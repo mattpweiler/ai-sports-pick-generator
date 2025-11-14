@@ -23,11 +23,21 @@ type GamesApiResponse = {
 };
 
 type Player = {
+  game_id: number;
+  team_abbr: string | null;
   player_id: number;
-  player_name: string;
-  team: string | number;
-  active_status: number;
-  position: string | null;
+  player_name: string | null;
+  start_pos: string | null;
+  min: string | null;
+  oreb: string | null;
+  dreb: string | null;
+  reb: string | null;
+  ast: number | null;
+  stl: number | null;
+  blk: string | null;
+  tov: number | null;
+  pf: number | null;
+  pts: number | null;
 };
 
 type PlayersApiResponse = {
@@ -58,10 +68,10 @@ function formatTime(dateStr: string | null) {
   });
 }
 
-function TeamBadge({ team }: { team: string | number }) {
+function TeamBadge({ label }: { label: string }) {
   return (
     <span className="text-xs rounded-full bg-cyan-500/10 px-2 py-1 text-cyan-300 border border-cyan-500/40">
-      {team}
+      {label}
     </span>
   );
 }
@@ -71,7 +81,6 @@ export default function NbaGamesPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  // expansion + players state
   const [expandedGameId, setExpandedGameId] = useState<number | null>(null);
   const [playersByGameId, setPlayersByGameId] = useState<
     Record<number, Player[]>
@@ -116,7 +125,6 @@ export default function NbaGamesPage() {
   async function handleToggleExpand(game: Game) {
     const id = game.game_id;
 
-    // collapse if already open
     if (expandedGameId === id) {
       setExpandedGameId(null);
       return;
@@ -124,12 +132,10 @@ export default function NbaGamesPage() {
 
     setExpandedGameId(id);
 
-    // if players already loaded for this game, don't refetch
-    if (playersByGameId[id]) return;
+    if (playersByGameId[id]) return; // already cached
 
     setLoadingPlayersFor(id);
     try {
-      // 🔹 use the new route that figures out teams from gameId
       const res = await fetch(`/api/nba-games/${id}/players`);
       const json: PlayersApiResponse = await res.json();
 
@@ -154,9 +160,9 @@ export default function NbaGamesPage() {
       <header className="border-b border-slate-700 bg-gradient-to-r from-black via-slate-900 to-black sticky top-0 z-10">
         <div className="mx-auto flex max-w-6xl items-center justify-between px-4 py-4">
           <div className="flex items-center gap-3">
-            {/* Faux Panthers “logo” vibe without actually using the logo */}
+            {/* Panthers-ish faux logo */}
             <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-cyan-500/20 ring-2 ring-cyan-400/60">
-              <span className="text-l font-black text-cyan-300">Picks</span>
+              <span className="text-xl font-black text-cyan-300">CLT</span>
             </div>
             <div>
               <h1 className="text-xl font-bold tracking-tight text-cyan-300">
@@ -175,7 +181,6 @@ export default function NbaGamesPage() {
 
       {/* Content */}
       <main className="mx-auto max-w-6xl px-4 py-6">
-        {/* Status / error */}
         {loading && (
           <div className="mb-4 rounded-xl border border-slate-700 bg-slate-900/70 px-4 py-3 text-sm text-slate-100">
             Loading games…
@@ -239,7 +244,7 @@ export default function NbaGamesPage() {
                         {formatTime(game.game_datetime_est)}
                       </div>
 
-                      {/* Teams */}
+                      {/* Teams (IDs for now; you can swap for names later using team_id_to_team) */}
                       <div className="col-span-2">
                         <div className="flex flex-col text-xs">
                           <div className="flex items-center gap-1">
@@ -309,17 +314,27 @@ export default function NbaGamesPage() {
                                   <span className="font-medium text-cyan-200">
                                     {p.player_name}
                                   </span>
-                                  <TeamBadge team={p.team} />
+                                  <TeamBadge
+                                    label={p.team_abbr ?? "UNK"}
+                                  />
                                 </div>
-                                <div className="text-xs text-slate-300">
-                                  Position:{" "}
-                                  <span className="text-cyan-300">
-                                    {p.position || "—"}
-                                  </span>
+                                <div className="text-xs text-slate-300 mb-1">
+                                  {p.start_pos || "Bench"} •{" "}
+                                  {p.min ?? "0"} MIN
                                 </div>
                                 <div className="text-xs text-slate-400">
-                                  Status:{" "}
-                                  {p.active_status === 1 ? "Active" : "Inactive"}
+                                  PTS:{" "}
+                                  <span className="text-cyan-200">
+                                    {p.pts ?? 0}
+                                  </span>{" "}
+                                  · REB:{" "}
+                                  <span className="text-cyan-200">
+                                    {p.reb ?? "0"}
+                                  </span>{" "}
+                                  · AST:{" "}
+                                  <span className="text-cyan-200">
+                                    {p.ast ?? 0}
+                                  </span>
                                 </div>
                               </div>
                             ))}
@@ -334,7 +349,7 @@ export default function NbaGamesPage() {
           </div>
         )}
 
-        {/* Little footer badge in Panthers colors */}
+        {/* Footer badge */}
         <div className="mt-6 flex justify-end">
           <div className="inline-flex items-center gap-2 rounded-full border border-cyan-500/40 bg-cyan-500/10 px-3 py-1 text-[11px] font-medium text-cyan-200 shadow-lg shadow-cyan-500/20">
             <span className="inline-block h-1.5 w-1.5 rounded-full bg-cyan-400" />

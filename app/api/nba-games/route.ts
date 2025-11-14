@@ -2,40 +2,47 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 
-console.log(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE);
 const supabase = createClient(
   process.env.SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE! // server-only key
+  process.env.SUPABASE_SERVICE_ROLE!
 );
 
-// keep table name in one place
 const GAMES_TABLE = "nba_games-2025-26";
 
-/**
- * This function retrieves from the NBA games database
- * @param req 
- * @returns 
- */
+type GameRow = {
+  game_id: number;
+  game_date: string | null;
+  game_datetime_est: string | null;
+  game_status_id: number | null;
+  game_status_text: string | null;
+  home_team_id: number | null;
+  away_team_id: number | null;
+  national_tv: string | null;
+  arena_name: string | null;
+  game_code: string | null;
+  game_sequence: number | null;
+};
+
 export async function GET(req: NextRequest) {
   try {
-    const { searchParams } = new URL(req.url);
-    const limitParam = searchParams.get("limit");
-
-    const limit =
-      limitParam && !Number.isNaN(Number(limitParam))
-        ? Math.min(parseInt(limitParam, 10), 500)
-        : undefined;
-
-    let query = supabase
+    const { data, error } = await supabase
       .from(GAMES_TABLE)
-      .select("*")
-      .order("game_datetime_est", { ascending: true });
-
-    if (limit) {
-      query = query.limit(limit);
-    }
-
-    const { data, error } = await query;
+      .select(
+        [
+          "game_id",
+          "game_date",
+          "game_datetime_est",
+          "game_status_id",
+          "game_status_text",
+          "home_team_id",
+          "away_team_id",
+          "national_tv",
+          "arena_name",
+          "game_code",
+          "game_sequence",
+        ].join(",")
+      )
+      .order("game_date", { ascending: true });
 
     if (error) {
       console.error("Supabase error fetching games:", error);
@@ -45,7 +52,7 @@ export async function GET(req: NextRequest) {
       );
     }
 
-    return NextResponse.json({ games: data ?? [] });
+    return NextResponse.json({ games: (data as any[]) ?? [] });
   } catch (err) {
     console.error("Unexpected error in GET /api/nba-games:", err);
     return NextResponse.json({ error: "Bad request." }, { status: 400 });
@@ -53,6 +60,5 @@ export async function GET(req: NextRequest) {
 }
 
 export async function OPTIONS() {
-  // CORS preflight (if you ever need it)
   return NextResponse.json({}, { status: 200 });
 }

@@ -17,6 +17,15 @@ type Game = {
   game_sequence: number | null;
 };
 
+type TeamMap = Record<number, {
+  team_id: number;
+  full_name: string;
+  abbreviation: string;
+  nickname: string;
+  city: string;
+}>;
+
+
 type GamesApiResponse = {
   games: Game[];
   error?: string;
@@ -134,6 +143,7 @@ function TeamBadge({ label }: { label: string }) {
 export default function NbaGamesPage() {
   const [games, setGames] = useState<Game[]>([]);
   const [loading, setLoading] = useState(true);
+  const [teams, setTeams] = useState<TeamMap>({});
   const [error, setError] = useState<string | null>(null);
   const [activeFilter, setActiveFilter] = useState<GamesFilter>("thisWeek");
   const [expandedDates, setExpandedDates] = useState<Record<string, boolean>>(
@@ -151,6 +161,19 @@ export default function NbaGamesPage() {
   useEffect(() => {
     let cancelled = false;
 
+    async function loadTeams() {
+      const res = await fetch("/api/teams");
+      const json = await res.json();
+  
+      if (!cancelled && res.ok) {
+        const map: TeamMap = {};
+        json.teams.forEach((t: any) => {
+          map[t.team_id] = t;
+        });
+        setTeams(map);
+      }
+    }
+    
     async function loadGames() {
       try {
         const res = await fetch("/api/nba-games");
@@ -175,12 +198,19 @@ export default function NbaGamesPage() {
     }
 
     loadGames();
+    loadTeams();
 
     return () => {
       cancelled = true;
     };
   }, []);
 
+  function getTeamName(teamId: number | null | undefined) {
+    if (!teamId) return "TBD";
+    const team = teams[teamId];
+    return team ? team.abbreviation : String(teamId); // fallback
+  }
+  
   async function handleToggleExpand(game: Game) {
     const id = game.game_id;
 
@@ -369,11 +399,10 @@ export default function NbaGamesPage() {
             {/* Table header */}
             <div className="grid grid-cols-12 items-center border-b border-slate-800 bg-gradient-to-r from-slate-950 via-slate-900 to-slate-950 px-4 py-3 text-xs font-semibold uppercase tracking-wide text-slate-400">
               <div className="col-span-3">Game</div>
-              <div className="col-span-2">Tip-off</div>
+              <div className="col-span-3">Tip-off</div>
               <div className="col-span-2">Teams</div>
               <div className="col-span-2">Arena</div>
               <div className="col-span-2">TV</div>
-              <div className="col-span-1 text-right">Status</div>
             </div>
 
             <div className="divide-y divide-slate-800">
@@ -405,6 +434,7 @@ export default function NbaGamesPage() {
                       dateGames.map((game) => {
                         const isExpanded = expandedGameId === game.game_id;
                         const players = playersByGameId[game.game_id] || [];
+                        const tipoffTime = formatTime(game.game_datetime_est);
 
                         return (
                           <div
@@ -426,8 +456,17 @@ export default function NbaGamesPage() {
                                 </span>
                               </div>
 
-                              <div className="col-span-2 text-sm text-slate-100">
-                                {formatTime(game.game_datetime_est)}
+                              <div className="col-span-3 text-sm text-slate-100">
+                                <span
+                                  className={[
+                                    "inline-flex items-center rounded-full px-3 py-1 text-[10px] font-semibold uppercase tracking-wide",
+                                    tipoffTime === "TBD"
+                                      ? "bg-slate-700/40 text-slate-200 ring-1 ring-slate-500/60"
+                                      : "bg-cyan-500/10 text-cyan-300 ring-1 ring-cyan-500/60",
+                                  ].join(" ")}
+                                >
+                                 {game.game_status_text}
+                                </span>
                               </div>
 
                               <div className="col-span-2">
@@ -435,13 +474,13 @@ export default function NbaGamesPage() {
                                   <div className="flex items-center gap-1">
                                     <span className="inline-flex h-2 w-2 rounded-full bg-cyan-400" />
                                     <span className="font-medium text-slate-100">
-                                      Home: {game.home_team_id ?? "TBD"}
+                                    Home: {getTeamName(game.home_team_id)}
                                     </span>
                                   </div>
                                   <div className="flex items-center gap-1">
                                     <span className="inline-flex h-2 w-2 rounded-full bg-slate-500" />
                                     <span className="text-slate-300">
-                                      Away: {game.away_team_id ?? "TBD"}
+                                    Away: {getTeamName(game.away_team_id)}
                                     </span>
                                   </div>
                                 </div>
@@ -453,19 +492,6 @@ export default function NbaGamesPage() {
 
                               <div className="col-span-2 text-xs text-slate-300">
                                 {game.national_tv || "—"}
-                              </div>
-
-                              <div className="col-span-1 flex justify-end">
-                                <span
-                                  className={[
-                                    "inline-flex items-center rounded-full px-3 py-1 text-[10px] font-semibold uppercase tracking-wide",
-                                    game.game_status_text === "Final"
-                                      ? "bg-emerald-500/10 text-emerald-300 ring-1 ring-emerald-500/60"
-                                      : "bg-cyan-500/10 text-cyan-300 ring-1 ring-cyan-500/60",
-                                  ].join(" ")}
-                                >
-                                  {game.game_status_text || "Scheduled"}
-                                </span>
                               </div>
                             </button>
 

@@ -45,6 +45,15 @@ type PlayersApiResponse = {
   error?: string;
 };
 
+type GamesFilter = "previous" | "thisWeek" | "future";
+
+const FILTER_TABS: { key: GamesFilter; label: string; description: string }[] =
+  [
+    { key: "previous", label: "Previous", description: "Before this week" },
+    { key: "thisWeek", label: "This Week", description: "Current week slate" },
+    { key: "future", label: "Upcoming", description: "After this week" },
+  ];
+
 function formatDate(dateStr: string | null) {
   if (!dateStr) return "TBD";
   const dt = new Date(dateStr);
@@ -68,6 +77,13 @@ function formatTime(dateStr: string | null) {
   });
 }
 
+function getGameDate(game: Game): Date | null {
+  const value = game.game_datetime_est ?? game.game_date;
+  if (!value) return null;
+  const dt = new Date(value);
+  return Number.isNaN(dt.getTime()) ? null : dt;
+}
+
 function TeamBadge({ label }: { label: string }) {
   return (
     <span className="text-xs rounded-full bg-cyan-500/10 px-2 py-1 text-cyan-300 border border-cyan-500/40">
@@ -80,6 +96,7 @@ export default function NbaGamesPage() {
   const [games, setGames] = useState<Game[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [activeFilter, setActiveFilter] = useState<GamesFilter>("thisWeek");
 
   const [expandedGameId, setExpandedGameId] = useState<number | null>(null);
   const [playersByGameId, setPlayersByGameId] = useState<
@@ -154,6 +171,29 @@ export default function NbaGamesPage() {
     }
   }
 
+  const now = new Date();
+  const startOfWeek = new Date(now);
+  startOfWeek.setHours(0, 0, 0, 0);
+  startOfWeek.setDate(startOfWeek.getDate() - startOfWeek.getDay());
+
+  const endOfWeek = new Date(startOfWeek);
+  endOfWeek.setDate(endOfWeek.getDate() + 6);
+  endOfWeek.setHours(23, 59, 59, 999);
+
+  const filteredGames = games.filter((game) => {
+    const date = getGameDate(game);
+    if (!date) {
+      return activeFilter === "future"; // unknown dates treated as upcoming
+    }
+    if (activeFilter === "previous") {
+      return date < startOfWeek;
+    }
+    if (activeFilter === "thisWeek") {
+      return date >= startOfWeek && date <= endOfWeek;
+    }
+    return date > endOfWeek;
+  });
+
   return (
     <div className="min-h-screen bg-gradient-to-b from-black via-slate-900 to-slate-950 text-slate-50">
       {/* Header */}
@@ -200,6 +240,42 @@ export default function NbaGamesPage() {
         )}
 
         {!loading && !error && games.length > 0 && (
+          <div className="mb-4 flex flex-wrap gap-3">
+            {FILTER_TABS.map((tab) => {
+              const isActive = tab.key === activeFilter;
+              return (
+                <button
+                  key={tab.key}
+                  type="button"
+                  onClick={() => {
+                    setActiveFilter(tab.key);
+                    setExpandedGameId(null);
+                  }}
+                  aria-pressed={isActive}
+                  className={[
+                    "flex flex-col rounded-2xl border px-4 py-3 text-left transition-colors max-w-[180px]",
+                    isActive
+                      ? "border-cyan-400 bg-cyan-500/10 text-cyan-100 shadow-lg shadow-cyan-500/20"
+                      : "border-slate-800 bg-slate-900/50 text-slate-300 hover:border-cyan-500/50",
+                  ].join(" ")}
+                >
+                  <span className="text-sm font-semibold">{tab.label}</span>
+                  <span className="text-[11px] text-slate-400">
+                    {tab.description}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        )}
+
+        {!loading && !error && filteredGames.length === 0 && games.length > 0 && (
+          <div className="rounded-xl border border-slate-800 bg-slate-950/60 px-4 py-6 text-center text-sm text-slate-300">
+            No games in this range. Try another tab.
+          </div>
+        )}
+
+        {!loading && !error && filteredGames.length > 0 && (
           <div className="overflow-hidden rounded-2xl border border-slate-800 bg-slate-950/70 shadow-xl shadow-black/40">
             {/* Table header */}
             <div className="grid grid-cols-12 items-center border-b border-slate-800 bg-gradient-to-r from-slate-950 via-slate-900 to-slate-950 px-4 py-3 text-xs font-semibold uppercase tracking-wide text-slate-400">
@@ -212,7 +288,7 @@ export default function NbaGamesPage() {
             </div>
 
             <div className="divide-y divide-slate-800">
-              {games.map((game) => {
+              {filteredGames.map((game) => {
                 const isExpanded = expandedGameId === game.game_id;
                 const players = playersByGameId[game.game_id] || [];
 

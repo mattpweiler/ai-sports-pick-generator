@@ -1,3 +1,17 @@
+import { NextResponse } from "next/server";
+
+export const runtime = "nodejs";
+
+export async function GET() {
+  console.log("[cron] Placeholder job invoked at", new Date().toISOString());
+  return NextResponse.json({
+    status: "ok",
+    message: "Cron endpoint placeholder response.",
+    timestamp: new Date().toISOString(),
+  });
+}
+
+// --- Legacy cron implementation retained for future work ---
 // // app/api/nba-sync/route.ts
 // import { NextRequest, NextResponse } from "next/server";
 // import crypto from "node:crypto";

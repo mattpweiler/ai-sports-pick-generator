@@ -54,28 +54,36 @@ const FILTER_TABS: { key: GamesFilter; label: string; description: string }[] =
     { key: "future", label: "Upcoming", description: "After this week" },
   ];
 
-function formatDate(dateStr: string | null) {
-  if (!dateStr) return "TBD";
-  const dt = new Date(dateStr);
-  if (!Number.isNaN(dt.getTime())) {
+  function formatGameDate(game: Game) {
+    // Prefer the game_date text field (schedule date)
+    if (!game.game_date) return "TBD";
+  
+    const raw = game.game_date.trim();
+  
+    // If it's already a human string like "THU, NOV 14", just show it
+    const isoLike = /^\d{4}-\d{2}-\d{2}$/.test(raw);
+    if (!isoLike) return raw;
+  
+    // If it's an ISO-like date (YYYY-MM-DD), parse at NOON UTC to avoid TZ shifting the day
+    const dt = new Date(raw + "T12:00:00Z");
+    if (Number.isNaN(dt.getTime())) return raw;
+  
     return dt.toLocaleDateString(undefined, {
       weekday: "short",
       month: "short",
       day: "numeric",
     });
   }
-  return dateStr;
-}
-
-function formatTime(dateStr: string | null) {
-  if (!dateStr) return "TBD";
-  const dt = new Date(dateStr);
-  if (Number.isNaN(dt.getTime())) return "TBD";
-  return dt.toLocaleTimeString(undefined, {
-    hour: "numeric",
-    minute: "2-digit",
-  });
-}
+  
+  function formatTime(dateStr: string | null) {
+    if (!dateStr) return "TBD";
+    const dt = new Date(dateStr);
+    if (Number.isNaN(dt.getTime())) return "TBD";
+    return dt.toLocaleTimeString(undefined, {
+      hour: "numeric",
+      minute: "2-digit",
+    });
+  }
 
 function getGameDate(game: Game): Date | null {
   const value = game.game_datetime_est ?? game.game_date;
@@ -83,6 +91,37 @@ function getGameDate(game: Game): Date | null {
   const dt = new Date(value);
   return Number.isNaN(dt.getTime()) ? null : dt;
 }
+
+function getDateKey(game: Game) {
+  const dt = getGameDate(game);
+  if (!dt) return "unknown";
+  return dt.toISOString().split("T")[0];
+}
+
+function formatGameDateFromString(dateStr: string) {
+  if (!dateStr) return "Date TBD";
+
+  const raw = dateStr.trim();
+  const isoLike = /^\d{4}-\d{2}-\d{2}$/.test(raw);
+
+  if (!isoLike) return raw;
+
+  // Parse at noon UTC to avoid timezone shift
+  const dt = new Date(raw + "T12:00:00Z");
+  if (Number.isNaN(dt.getTime())) return raw;
+
+  return dt.toLocaleDateString(undefined, {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+  });
+}
+
+function getDateLabelFromKey(key: string) {
+  if (key === "unknown") return "Date TBD";
+  return formatGameDateFromString(key);
+}
+
 
 function TeamBadge({ label }: { label: string }) {
   return (
@@ -97,6 +136,9 @@ export default function NbaGamesPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [activeFilter, setActiveFilter] = useState<GamesFilter>("thisWeek");
+  const [expandedDates, setExpandedDates] = useState<Record<string, boolean>>(
+    {}
+  );
 
   const [expandedGameId, setExpandedGameId] = useState<number | null>(null);
   const [playersByGameId, setPlayersByGameId] = useState<
@@ -194,6 +236,52 @@ export default function NbaGamesPage() {
     return date > endOfWeek;
   });
 
+  const gamesByDate = filteredGames.reduce<Record<string, Game[]>>(
+    (acc, game) => {
+      const key = getDateKey(game);
+      if (!acc[key]) acc[key] = [];
+      acc[key].push(game);
+      return acc;
+    },
+    {}
+  );
+
+  const dateSections = Object.entries(gamesByDate).sort(([a], [b]) => {
+    if (a === "unknown") return 1;
+    if (b === "unknown") return -1;
+    return a.localeCompare(b);
+  });
+
+  function toggleDateSection(key: string) {
+    setExpandedDates((prev) => ({
+      ...prev,
+      [key]: !(prev[key] ?? false),
+    }));
+  }
+
+  function isDateExpanded(key: string) {
+    return expandedDates[key] ?? false;
+  }
+
+  const ArrowIcon = ({ expanded }: { expanded: boolean }) => (
+    <svg
+      className={[
+        "h-4 w-4 text-cyan-200 transition-transform",
+        expanded ? "rotate-90" : "",
+      ].join(" ")}
+      fill="none"
+      viewBox="0 0 24 24"
+      stroke="currentColor"
+      strokeWidth={2}
+    >
+      <path
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        d="M9 5l7 7-7 7"
+      />
+    </svg>
+  );
+
   return (
     <div className="min-h-screen bg-gradient-to-b from-black via-slate-900 to-slate-950 text-slate-50">
       {/* Header */}
@@ -201,8 +289,8 @@ export default function NbaGamesPage() {
         <div className="mx-auto flex max-w-6xl items-center justify-between px-4 py-4">
           <div className="flex items-center gap-3">
             {/* Panthers-ish faux logo */}
-            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-cyan-500/20 ring-2 ring-cyan-400/60">
-              <span className="text-xl font-black text-cyan-300">CLT</span>
+            <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-cyan-500/20 ring-2 ring-cyan-400/60">
+              <span className="text-l font-black text-cyan-300">Picks</span>
             </div>
             <div>
               <h1 className="text-xl font-bold tracking-tight text-cyan-300">
@@ -250,6 +338,7 @@ export default function NbaGamesPage() {
                   onClick={() => {
                     setActiveFilter(tab.key);
                     setExpandedGameId(null);
+                    setExpandedDates({});
                   }}
                   aria-pressed={isActive}
                   className={[
@@ -288,136 +377,155 @@ export default function NbaGamesPage() {
             </div>
 
             <div className="divide-y divide-slate-800">
-              {filteredGames.map((game) => {
-                const isExpanded = expandedGameId === game.game_id;
-                const players = playersByGameId[game.game_id] || [];
-
+              {dateSections.map(([dateKey, dateGames]) => {
+                const expanded = isDateExpanded(dateKey);
                 return (
-                  <div
-                    key={game.game_id}
-                    className="border-b border-slate-800/50"
-                  >
-                    {/* Clickable main row */}
+                  <div key={dateKey} className="border-b border-slate-800/50">
                     <button
-                      onClick={() => handleToggleExpand(game)}
-                      className="grid grid-cols-12 items-center px-4 py-3 text-sm w-full text-left transition-colors hover:bg-slate-900/70"
+                      type="button"
+                      onClick={() => toggleDateSection(dateKey)}
+                      className="flex w-full items-center justify-between px-4 py-2 text-left text-sm font-semibold text-cyan-100 bg-slate-900/60 hover:bg-slate-900/80 transition-colors cursor-pointer"
                     >
-                      {/* Game code / date */}
-                      <div className="col-span-3 flex flex-col gap-0.5">
-                        <span className="text-xs font-semibold uppercase tracking-wider text-cyan-300">
-                          {formatDate(
-                            game.game_datetime_est ?? game.game_date ?? null
-                          )}
+                      <div className="flex items-center gap-3">
+                        <ArrowIcon expanded={expanded} />
+                        <span className="text-xs uppercase tracking-wider">
+                          {getDateLabelFromKey(dateKey)}
                         </span>
-                        <span className="text-xs text-slate-400">
-                          {game.game_code ||
-                            `Game #${game.game_sequence ?? "–"}`}
+                        <span className="rounded-full border border-cyan-500/40 bg-cyan-500/10 px-2 py-0.5 text-[11px] text-cyan-200">
+                          {dateGames.length} game
+                          {dateGames.length > 1 ? "s" : ""}
                         </span>
                       </div>
-
-                      {/* Time */}
-                      <div className="col-span-2 text-sm text-slate-100">
-                        {formatTime(game.game_datetime_est)}
-                      </div>
-
-                      {/* Teams (IDs for now; you can swap for names later using team_id_to_team) */}
-                      <div className="col-span-2">
-                        <div className="flex flex-col text-xs">
-                          <div className="flex items-center gap-1">
-                            <span className="inline-flex h-2 w-2 rounded-full bg-cyan-400" />
-                            <span className="font-medium text-slate-100">
-                              Home: {game.home_team_id ?? "TBD"}
-                            </span>
-                          </div>
-                          <div className="flex items-center gap-1">
-                            <span className="inline-flex h-2 w-2 rounded-full bg-slate-500" />
-                            <span className="text-slate-300">
-                              Away: {game.away_team_id ?? "TBD"}
-                            </span>
-                          </div>
-                        </div>
-                      </div>
-
-                      {/* Arena */}
-                      <div className="col-span-2 text-xs text-slate-300">
-                        {game.arena_name || "TBD"}
-                      </div>
-
-                      {/* TV */}
-                      <div className="col-span-2 text-xs text-slate-300">
-                        {game.national_tv || "—"}
-                      </div>
-
-                      {/* Status pill */}
-                      <div className="col-span-1 flex justify-end">
-                        <span
-                          className={[
-                            "inline-flex items-center rounded-full px-3 py-1 text-[10px] font-semibold uppercase tracking-wide",
-                            game.game_status_text === "Final"
-                              ? "bg-emerald-500/10 text-emerald-300 ring-1 ring-emerald-500/60"
-                              : "bg-cyan-500/10 text-cyan-300 ring-1 ring-cyan-500/60",
-                          ].join(" ")}
-                        >
-                          {game.game_status_text || "Scheduled"}
-                        </span>
-                      </div>
+                      <span className="text-xs text-cyan-300">
+                        {expanded ? "Hide" : "Show"}
+                      </span>
                     </button>
 
-                    {/* Expandable players section */}
-                    {isExpanded && (
-                      <div className="bg-slate-900/60 px-6 py-4 text-sm">
-                        {loadingPlayersFor === game.game_id && (
-                          <div className="text-cyan-300 text-xs mb-2">
-                            Loading players…
-                          </div>
-                        )}
+                    {expanded &&
+                      dateGames.map((game) => {
+                        const isExpanded = expandedGameId === game.game_id;
+                        const players = playersByGameId[game.game_id] || [];
 
-                        {loadingPlayersFor !== game.game_id &&
-                          players.length === 0 && (
-                            <div className="text-xs text-slate-400">
-                              No players found for this game.
-                            </div>
-                          )}
+                        return (
+                          <div
+                            key={game.game_id}
+                            className="border-t border-slate-800/60"
+                          >
+                            <button
+                              onClick={() => handleToggleExpand(game)}
+                              className="grid grid-cols-12 items-center px-4 py-3 text-sm w-full text-left transition-colors hover:bg-slate-900/70"
+                            >
+                              <div className="col-span-3 flex flex-col gap-0.5">
+                                <span className="text-xs font-semibold uppercase tracking-wider text-cyan-300">
+                                {formatGameDate(game)}
 
-                        {players.length > 0 && (
-                          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                            {players.map((p) => (
-                              <div
-                                key={p.player_id}
-                                className="rounded-xl border border-cyan-500/30 bg-cyan-500/5 p-3"
-                              >
-                                <div className="flex justify-between items-center mb-1">
-                                  <span className="font-medium text-cyan-200">
-                                    {p.player_name}
-                                  </span>
-                                  <TeamBadge
-                                    label={p.team_abbr ?? "UNK"}
-                                  />
-                                </div>
-                                <div className="text-xs text-slate-300 mb-1">
-                                  {p.start_pos || "Bench"} •{" "}
-                                  {p.min ?? "0"} MIN
-                                </div>
-                                <div className="text-xs text-slate-400">
-                                  PTS:{" "}
-                                  <span className="text-cyan-200">
-                                    {p.pts ?? 0}
-                                  </span>{" "}
-                                  · REB:{" "}
-                                  <span className="text-cyan-200">
-                                    {p.reb ?? "0"}
-                                  </span>{" "}
-                                  · AST:{" "}
-                                  <span className="text-cyan-200">
-                                    {p.ast ?? 0}
-                                  </span>
+                                </span>
+                                <span className="text-xs text-slate-400">
+                                  {game.game_code ||
+                                    `Game #${game.game_sequence ?? "–"}`}
+                                </span>
+                              </div>
+
+                              <div className="col-span-2 text-sm text-slate-100">
+                                {formatTime(game.game_datetime_est)}
+                              </div>
+
+                              <div className="col-span-2">
+                                <div className="flex flex-col text-xs">
+                                  <div className="flex items-center gap-1">
+                                    <span className="inline-flex h-2 w-2 rounded-full bg-cyan-400" />
+                                    <span className="font-medium text-slate-100">
+                                      Home: {game.home_team_id ?? "TBD"}
+                                    </span>
+                                  </div>
+                                  <div className="flex items-center gap-1">
+                                    <span className="inline-flex h-2 w-2 rounded-full bg-slate-500" />
+                                    <span className="text-slate-300">
+                                      Away: {game.away_team_id ?? "TBD"}
+                                    </span>
+                                  </div>
                                 </div>
                               </div>
-                            ))}
+
+                              <div className="col-span-2 text-xs text-slate-300">
+                                {game.arena_name || "TBD"}
+                              </div>
+
+                              <div className="col-span-2 text-xs text-slate-300">
+                                {game.national_tv || "—"}
+                              </div>
+
+                              <div className="col-span-1 flex justify-end">
+                                <span
+                                  className={[
+                                    "inline-flex items-center rounded-full px-3 py-1 text-[10px] font-semibold uppercase tracking-wide",
+                                    game.game_status_text === "Final"
+                                      ? "bg-emerald-500/10 text-emerald-300 ring-1 ring-emerald-500/60"
+                                      : "bg-cyan-500/10 text-cyan-300 ring-1 ring-cyan-500/60",
+                                  ].join(" ")}
+                                >
+                                  {game.game_status_text || "Scheduled"}
+                                </span>
+                              </div>
+                            </button>
+
+                            {isExpanded && (
+                              <div className="bg-slate-900/60 px-6 py-4 text-sm">
+                                {loadingPlayersFor === game.game_id && (
+                                  <div className="text-cyan-300 text-xs mb-2">
+                                    Loading players…
+                                  </div>
+                                )}
+
+                                {loadingPlayersFor !== game.game_id &&
+                                  players.length === 0 && (
+                                    <div className="text-xs text-slate-400">
+                                      No players found for this game.
+                                    </div>
+                                  )}
+
+                                {players.length > 0 && (
+                                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                                    {players.map((p) => (
+                                      <div
+                                        key={p.player_id}
+                                        className="rounded-xl border border-cyan-500/30 bg-cyan-500/5 p-3"
+                                      >
+                                        <div className="flex justify-between items-center mb-1">
+                                          <span className="font-medium text-cyan-200">
+                                            {p.player_name}
+                                          </span>
+                                          <TeamBadge
+                                            label={p.team_abbr ?? "UNK"}
+                                          />
+                                        </div>
+                                        <div className="text-xs text-slate-300 mb-1">
+                                          {p.start_pos || "Bench"} •{" "}
+                                          {p.min ?? "0"} MIN
+                                        </div>
+                                        <div className="text-xs text-slate-400">
+                                          PTS:{" "}
+                                          <span className="text-cyan-200">
+                                            {p.pts ?? 0}
+                                          </span>{" "}
+                                          · REB:{" "}
+                                          <span className="text-cyan-200">
+                                            {p.reb ?? "0"}
+                                          </span>{" "}
+                                          · AST:{" "}
+                                          <span className="text-cyan-200">
+                                            {p.ast ?? 0}
+                                          </span>
+                                        </div>
+                                      </div>
+                                    ))}
+                                  </div>
+                                )}
+                              </div>
+                            )}
                           </div>
-                        )}
-                      </div>
-                    )}
+                        );
+                      })}
                   </div>
                 );
               })}

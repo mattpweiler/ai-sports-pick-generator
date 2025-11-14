@@ -22,6 +22,14 @@ export default function Home() {
           Have feedback or want a preview? Just reach out and we&apos;ll walk
           through the latest progress together.
         </p>
+        <div className="mt-16">
+          <a
+            href="/nba-games"
+            className="inline-flex items-center justify-center rounded-full bg-cyan-500 px-10 py-4 font-semibold text-slate-900 shadow-2xl shadow-cyan-500/30 transition hover:bg-cyan-400 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-500 text-lg"
+          >
+            Go to NBA Games
+          </a>
+        </div>
       </div>
     </main>
   );

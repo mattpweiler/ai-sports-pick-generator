@@ -522,7 +522,7 @@ export async function GET(req: NextRequest) {
       connectivityTest,
     });
 
-    if (connectivityTest) {
+    if (true) {
       const testUrl =
         "https://stats.nba.com/stats/leaguegamelog?Counter=1&Direction=ASC&LeagueID=00&PlayerOrTeam=T&Season=2025-26&SeasonType=Regular+Season&Sorter=DATE";
       logger.info("running connectivity test", { testUrl });

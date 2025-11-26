@@ -508,6 +508,7 @@ export async function GET(req: NextRequest) {
     const schema = params.get("schema") || DEFAULT_SCHEMA;
     const table = params.get("table") || DEFAULT_TABLE;
     const dryRun = (params.get("dryRun") || "").toLowerCase() === "true";
+    const connectivityTest = (params.get("connectivityTest") || "").toLowerCase() === "true";
 
     logger.info("cron invoked", {
       season,
@@ -518,7 +519,41 @@ export async function GET(req: NextRequest) {
       schema,
       table,
       dryRun,
+      connectivityTest,
     });
+
+    if (connectivityTest) {
+      const testUrl =
+        "https://stats.nba.com/stats/leaguegamelog?Counter=1&Direction=ASC&LeagueID=00&PlayerOrTeam=T&Season=2025-26&SeasonType=Regular+Season&Sorter=DATE";
+      logger.info("running connectivity test", { testUrl });
+      try {
+        const res = await fetch(testUrl, {
+          headers: NBA_HEADERS,
+          cache: "no-store",
+        });
+        const text = await res.text();
+        const payload = {
+          ok: res.ok,
+          status: res.status,
+          statusText: res.statusText,
+          sample: text.slice(0, 300),
+        };
+        logger.info("connectivity test response", payload);
+        return NextResponse.json({ testUrl, ...payload, logs: logger.logs });
+      } catch (err) {
+        logger.error("connectivity test failed", {
+          error: err instanceof Error ? err.message : String(err),
+        });
+        return NextResponse.json(
+          {
+            error: err instanceof Error ? err.message : String(err),
+            testUrl,
+            logs: logger.logs,
+          },
+          { status: 502 }
+        );
+      }
+    }
 
     const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE, {
       auth: { persistSession: false },

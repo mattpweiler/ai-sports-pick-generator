@@ -1,0 +1,34 @@
+name: NBA Ingestion
+
+on:
+  schedule:
+    - cron: "10 21 26 11 *"   # runs at 4:10pm EST on Nov 26, 2025
+    workflow_dispatch:
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install nba_api pandas requests supabase
+
+      - name: Run ingestion script
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE: ${{ secrets.SUPABASE_SERVICE_ROLE }}
+          SUPABASE_SCHEMA: "public"
+          SUPABASE_TABLE: "pergame_player_base_stats_2025_26"
+          DECODO_PROXY: ${{ secrets.DECODO_PROXY }}   # <-- correct spelling
+        run: |
+          echo "Starting NBA ingestion..."
+          python3 python-scripts/get-nba-data-works.py --season 2025-26 --season-type "Regular Season"

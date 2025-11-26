@@ -3,7 +3,7 @@ name: NBA Ingestion
 on:
   schedule:
     - cron: "10 21 26 11 *"   # runs at 4:10pm EST on Nov 26, 2025
-    workflow_dispatch:
+  workflow_dispatch:
 
 jobs:
   ingest:
@@ -28,7 +28,9 @@ jobs:
           SUPABASE_SERVICE_ROLE: ${{ secrets.SUPABASE_SERVICE_ROLE }}
           SUPABASE_SCHEMA: "public"
           SUPABASE_TABLE: "pergame_player_base_stats_2025_26"
-          DECODO_PROXY: ${{ secrets.DECODO_PROXY }}   # <-- correct spelling
+          DECODO_PROXY: ${{ secrets.DECODO_PROXY }}
         run: |
           echo "Starting NBA ingestion..."
-          python3 python-scripts/get-nba-data-works.py --season 2025-26 --season-type "Regular Season"
+          python3 python-scripts/get-nba-data-works.py \
+            --season 2025-26 \
+            --season-type "Regular Season"

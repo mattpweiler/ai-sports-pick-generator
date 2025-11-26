@@ -2,7 +2,7 @@ name: NBA Ingestion
 
 on:
   schedule:
-    - cron: "10 21 26 11 *"   # your existing schedule
+    - cron: "6 0 * * *"   # runs daily at midnight Central Time (UTC-6)
   workflow_dispatch:
 
 jobs:
@@ -14,7 +14,7 @@ jobs:
       SUPABASE_SERVICE_ROLE: ${{ secrets.SUPABASE_SERVICE_ROLE }}
       SUPABASE_SCHEMA: public
       SUPABASE_TABLE: pergame_player_base_stats_2025_26
-
+      DECODO_PROXY: ${{ secrets.DECODO_PROXY }}
       # Route all HTTP(S) traffic (including nba_api) through Decodo on GitHub only
       HTTP_PROXY: ${{ secrets.DECODO_PROXY }}
       HTTPS_PROXY: ${{ secrets.DECODO_PROXY }}

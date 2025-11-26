@@ -1,497 +1,703 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
+import crypto from "node:crypto";
+import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
 export const runtime = "nodejs";
 
-export async function GET() {
-  console.log("[cron] Placeholder job invoked at", new Date().toISOString());
-  return NextResponse.json({
-    status: "ok",
-    message: "Cron endpoint placeholder response.",
-    timestamp: new Date().toISOString(),
+const LOG_PREFIX = "[cron]";
+const DEFAULT_SEASON = "2025-26";
+const DEFAULT_SEASON_TYPE = "Regular Season";
+const DEFAULT_RECENT_DAYS = 30;
+const DEFAULT_TIMEZONE = "America/Chicago";
+const SLEEP_AFTER_LIST_MS = 2000;
+const SLEEP_BETWEEN_GAMES_MS = 1000;
+const RETRY_BASE_DELAY_MS = 1000;
+const MAX_V3_RETRIES = 5;
+
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_SERVICE_ROLE = process.env.SUPABASE_SERVICE_ROLE;
+const DEFAULT_SCHEMA = process.env.SUPABASE_SCHEMA || "public";
+const DEFAULT_TABLE =
+  process.env.SUPABASE_TABLE || "pergame_player_base_stats_2025_26";
+
+const NBA_HEADERS: Record<string, string> = {
+  "User-Agent":
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
+  Accept: "application/json, text/plain, */*",
+  "Accept-Language": "en-US,en;q=0.9",
+  Referer: "https://www.nba.com/",
+  Origin: "https://www.nba.com",
+  Host: "stats.nba.com",
+  "x-nba-stats-origin": "stats",
+  "x-nba-stats-token": "true",
+  Connection: "keep-alive",
+};
+
+type LogEntry = {
+  ts: string;
+  level: "info" | "warn" | "error";
+  message: string;
+  meta?: Record<string, unknown>;
+};
+
+type GameRow = {
+  game_id: string;
+  game_date: string | null;
+  matchup: string | null;
+  parsedDate: Date | null;
+};
+
+type RowValue = string | number | null;
+type PlayerRow = Record<string, unknown>;
+
+type BoxScoreResponse = {
+  boxScoreTraditional?: {
+    headers?: string[];
+    rowSet?: RowValue[][];
+    playerStats?: PlayerRow[];
+    players?: PlayerRow[];
+  };
+};
+
+type NormalizedPlayerRow = {
+  game_id: string;
+  team_abbr: string | null;
+  player_id: number | null;
+  player_name: string | null;
+  start_pos: string | null;
+  min: string | null;
+  fgm: number | null;
+  fga: number | null;
+  fg_pct: number | null;
+  fg3m: number | null;
+  fg3a: number | null;
+  fg3_pct: number | null;
+  ftm: number | null;
+  fta: number | null;
+  ft_pct: number | null;
+  oreb: number | null;
+  dreb: number | null;
+  reb: number | null;
+  ast: number | null;
+  stl: number | null;
+  blk: number | null;
+  tov: number | null;
+  pf: number | null;
+  pts: number | null;
+  plus_minus: number | null;
+  comment: string | null;
+  matchup?: string | null;
+  game_date?: string | null;
+  row_checksum?: string;
+  updated_at?: string;
+};
+
+type UpsertPayload = Omit<NormalizedPlayerRow, "row_checksum" | "updated_at">;
+
+type Logger = {
+  logs: LogEntry[];
+  info: (message: string, meta?: Record<string, unknown>) => void;
+  warn: (message: string, meta?: Record<string, unknown>) => void;
+  error: (message: string, meta?: Record<string, unknown>) => void;
+};
+
+function createLogger(): Logger {
+  const logs: LogEntry[] = [];
+  const push = (
+    level: LogEntry["level"],
+    message: string,
+    meta?: Record<string, unknown>
+  ) => {
+    const ts = new Date().toISOString();
+    const entry: LogEntry = { ts, level, message };
+    if (meta && Object.keys(meta).length) {
+      try {
+        entry.meta = JSON.parse(JSON.stringify(meta));
+      } catch (err) {
+        entry.meta = { note: "meta serialization failed", error: String(err) };
+      }
+    }
+    logs.push(entry);
+    const fn = level === "error" ? console.error : level === "warn" ? console.warn : console.log;
+    fn(`${LOG_PREFIX} ${ts} [${level}] ${message}`, meta ?? "");
+  };
+  return {
+    logs,
+    info: (message, meta) => push("info", message, meta),
+    warn: (message, meta) => push("warn", message, meta),
+    error: (message, meta) => push("error", message, meta),
+  };
+}
+
+const toIsoDate = (date: Date) => date.toISOString().slice(0, 10);
+
+const tzIsoDate = (timeZone: string, offsetDays = 0) => {
+  const now = new Date();
+  const tzDate = new Date(now.toLocaleString("en-US", { timeZone }));
+  tzDate.setDate(tzDate.getDate() + offsetDays);
+  return toIsoDate(tzDate);
+};
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, Math.max(ms, 0)));
+
+const sha256 = (s: string) => crypto.createHash("sha256").update(s).digest("hex");
+
+const safeNumber = (value: unknown): number | null => {
+  if (value === null || value === undefined || value === "") return null;
+  const num = Number(value);
+  return Number.isFinite(num) ? num : null;
+};
+
+const safeString = (value: unknown): string | null => {
+  if (value === null || value === undefined) return null;
+  const str = String(value).trim();
+  return str === "" ? null : str;
+};
+
+const parseDate = (value: string | null): Date | null => {
+  if (!value) return null;
+  const attempt = new Date(value);
+  if (!Number.isNaN(attempt.getTime())) return attempt;
+  const fallback = new Date(`${value} UTC`);
+  if (!Number.isNaN(fallback.getTime())) return fallback;
+  return null;
+};
+
+async function fetchJSON<T>(
+  url: string,
+  logger: Logger,
+  opts: RequestInit = {},
+  retries = 5
+): Promise<T> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      const response = await fetch(url, {
+        ...opts,
+        headers: { ...NBA_HEADERS, ...(opts.headers || {}) },
+        cache: "no-store",
+      });
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status} ${response.statusText}`);
+      }
+      return (await response.json()) as T;
+    } catch (err) {
+      lastError = err;
+      if (attempt < retries) {
+        logger.warn("fetch retry", {
+          url,
+          attempt,
+          retries,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        await sleep(RETRY_BASE_DELAY_MS * attempt);
+      }
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error(String(lastError));
+}
+
+async function fetchGames(
+  season: string,
+  seasonType: string,
+  dateFrom: string,
+  dateTo: string,
+  logger: Logger
+): Promise<GameRow[]> {
+  type LeagueGameLogResponse = {
+    resultSets?: Array<{ headers: string[]; rowSet: RowValue[][]; name?: string }>;
+    resultSet?: { headers: string[]; rowSet: RowValue[][] };
+  };
+
+  const params = new URLSearchParams({
+    Counter: "10000",
+    Direction: "ASC",
+    LeagueID: "00",
+    PlayerOrTeam: "T",
+    Season: season,
+    SeasonType: seasonType,
+    Sorter: "DATE",
+    DateFrom: dateFrom,
+    DateTo: dateTo,
+  });
+
+  const json = await fetchJSON<LeagueGameLogResponse>(
+    `https://stats.nba.com/stats/leaguegamelog?${params.toString()}`,
+    logger
+  );
+
+  const rs =
+    json.resultSets?.find((set) =>
+      (set.name || "").toLowerCase().includes("leaguegamelog")
+    ) || json.resultSets?.[0] || json.resultSet;
+
+  if (!rs) return [];
+
+  const { headers, rowSet } = rs;
+  const idx: Record<string, number> = {};
+  headers.forEach((header, i) => {
+    idx[header] = i;
+  });
+
+  const seen = new Set<string>();
+  const games: GameRow[] = [];
+  for (const row of rowSet) {
+    const gameId = String(row[idx["GAME_ID"]]);
+    if (seen.has(gameId)) continue;
+    seen.add(gameId);
+    const gameDateRaw = row[idx["GAME_DATE"]] as string | null;
+    const parsed = parseDate(gameDateRaw);
+    const iso = parsed ? toIsoDate(parsed) : gameDateRaw;
+    games.push({
+      game_id: gameId,
+      game_date: iso,
+      matchup: row[idx["MATCHUP"]] !== undefined && row[idx["MATCHUP"]] !== null ? String(row[idx["MATCHUP"]]) : null,
+      parsedDate: parsed,
+    });
+  }
+
+  games.sort((a, b) => {
+    if (!a.game_date && !b.game_date) return 0;
+    if (!a.game_date) return 1;
+    if (!b.game_date) return -1;
+    return a.game_date.localeCompare(b.game_date);
+  });
+
+  logger.info("games enumerated", { count: games.length });
+  return games;
+}
+
+async function fetchBoxScoreTraditionalV3(
+  gameId: string,
+  logger: Logger
+): Promise<BoxScoreResponse | null> {
+  for (let attempt = 1; attempt <= MAX_V3_RETRIES; attempt++) {
+    try {
+      const params = new URLSearchParams({ GameID: gameId, LeagueID: "00" });
+      const data = await fetchJSON<BoxScoreResponse>(
+        `https://stats.nba.com/stats/boxscoretraditionalv3?${params.toString()}`,
+        logger
+      );
+      return data;
+    } catch (err) {
+      logger.warn("boxscore fetch failed", {
+        gameId,
+        attempt,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      await sleep(RETRY_BASE_DELAY_MS * attempt);
+    }
+  }
+
+  logger.error("boxscore failed after retries", { gameId });
+  return null;
+}
+
+function pickPlayerFrame(v3: BoxScoreResponse | null | undefined): PlayerRow[] {
+  const camel =
+    v3?.boxScoreTraditional?.playerStats || v3?.boxScoreTraditional?.players;
+  if (Array.isArray(camel) && camel.length) return camel;
+
+  const headers = v3?.boxScoreTraditional?.headers;
+  const rows = v3?.boxScoreTraditional?.rowSet;
+  if (!Array.isArray(headers) || !Array.isArray(rows)) return [];
+
+  const idx: Record<string, number> = {};
+  headers.forEach((header: string, i: number) => {
+    idx[header] = i;
+  });
+
+  return rows.map((row: RowValue[]) => {
+    const pick = (key: string) => {
+      const position = idx[key];
+      return position === undefined ? undefined : row[position];
+    };
+    return {
+      personId: pick("PLAYER_ID") ?? pick("PERSON_ID"),
+      playerName: pick("PLAYER_NAME"),
+      teamTricode: pick("TEAM_ABBREVIATION"),
+      position: pick("START_POSITION"),
+      comment: pick("COMMENT"),
+      minutes: pick("MIN"),
+      fieldGoalsMade: pick("FGM"),
+      fieldGoalsAttempted: pick("FGA"),
+      fieldGoalsPercentage: pick("FG_PCT"),
+      threePointersMade: pick("FG3M"),
+      threePointersAttempted: pick("FG3A"),
+      threePointersPercentage: pick("FG3_PCT"),
+      freeThrowsMade: pick("FTM"),
+      freeThrowsAttempted: pick("FTA"),
+      freeThrowsPercentage: pick("FT_PCT"),
+      reboundsOffensive: pick("OREB"),
+      reboundsDefensive: pick("DREB"),
+      reboundsTotal: pick("REB"),
+      assists: pick("AST"),
+      steals: pick("STL"),
+      blocks: pick("BLK"),
+      turnovers: pick("TOV") ?? pick("TO") ?? pick("TURNOVERS"),
+      personalFouls: pick("PF"),
+      points: pick("PTS"),
+      plusMinusPoints: pick("PLUS_MINUS"),
+    } as PlayerRow;
   });
 }
 
-// --- Legacy cron implementation retained for future work ---
-// // app/api/nba-sync/route.ts
-// import { NextRequest, NextResponse } from "next/server";
-// import crypto from "node:crypto";
-// import { createClient } from "@supabase/supabase-js";
+function normalizePlayerBase(rows: PlayerRow[], gameId: string): NormalizedPlayerRow[] {
+  return rows.map((row) => {
+    const playerId = row.personId ?? row.player_id ?? row.PLAYER_ID;
+    const first = safeString(row.firstName);
+    const last = safeString(row.familyName);
+    const slug = safeString(row.playerSlug);
+    const combined = [first, last].filter(Boolean).join(" ").trim();
+    const playerName = safeString(combined || row.playerName || slug || null);
 
-// // Ensure Node runtime (NBA stats often fail on Edge because of headers/cookies).
-// export const runtime = "nodejs";
+    return {
+      game_id: gameId,
+      team_abbr: safeString(row.teamTricode ?? row.team_abbr),
+      player_id: safeNumber(playerId),
+      player_name: playerName,
+      start_pos: safeString(row.position ?? row.start_pos),
+      min: safeString(row.minutes ?? row.min),
+      fgm: safeNumber(row.fieldGoalsMade ?? row.fgm),
+      fga: safeNumber(row.fieldGoalsAttempted ?? row.fga),
+      fg_pct: safeNumber(row.fieldGoalsPercentage ?? row.fg_pct),
+      fg3m: safeNumber(row.threePointersMade ?? row.fg3m),
+      fg3a: safeNumber(row.threePointersAttempted ?? row.fg3a),
+      fg3_pct: safeNumber(row.threePointersPercentage ?? row.fg3_pct),
+      ftm: safeNumber(row.freeThrowsMade ?? row.ftm),
+      fta: safeNumber(row.freeThrowsAttempted ?? row.fta),
+      ft_pct: safeNumber(row.freeThrowsPercentage ?? row.ft_pct),
+      oreb: safeNumber(row.reboundsOffensive ?? row.oreb),
+      dreb: safeNumber(row.reboundsDefensive ?? row.dreb),
+      reb: safeNumber(row.reboundsTotal ?? row.reb),
+      ast: safeNumber(row.assists ?? row.ast),
+      stl: safeNumber(row.steals ?? row.stl),
+      blk: safeNumber(row.blocks ?? row.blk),
+      tov: safeNumber(row.turnovers ?? row.tov ?? row.TOV ?? row.TO),
+      pf: safeNumber(row.personalFouls ?? row.foulsPersonal ?? row.pf),
+      pts: safeNumber(row.points ?? row.pts),
+      plus_minus: safeNumber(row.plusMinusPoints ?? row.plus_minus ?? row.plusMinus),
+      comment: safeString(row.comment),
+    };
+  });
+}
 
-// // --- ENV ---
-// // Set these in Vercel Project Settings → Environment Variables
-// const SUPABASE_URL = process.env.SUPABASE_URL!;
-// const SUPABASE_SERVICE_ROLE = process.env.SUPABASE_SERVICE_ROLE!;
-// const DEFAULT_SCHEMA = process.env.SUPABASE_SCHEMA || "public";
-// const DEFAULT_TABLE =
-//   process.env.SUPABASE_TABLE || "pergame_player_base_stats_2025_26";
+const checksumFields: Array<keyof NormalizedPlayerRow> = [
+  "team_abbr",
+  "player_id",
+  "player_name",
+  "start_pos",
+  "min",
+  "fgm",
+  "fga",
+  "fg_pct",
+  "fg3m",
+  "fg3a",
+  "fg3_pct",
+  "ftm",
+  "fta",
+  "ft_pct",
+  "oreb",
+  "dreb",
+  "reb",
+  "ast",
+  "stl",
+  "blk",
+  "tov",
+  "pf",
+  "pts",
+  "plus_minus",
+  "comment",
+];
 
-// // NBA headers (stats.nba.com rejects default fetch headers)
-// const NBA_HEADERS: Record<string, string> = {
-//   "User-Agent":
-//     "Mozilla/5.0 (Macintosh; Intel Mac OS X) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
-//   Accept: "application/json, text/plain, */*",
-//   "Accept-Language": "en-US,en;q=0.9",
-//   Referer: "https://www.nba.com/",
-//   Origin: "https://www.nba.com",
-//   Host: "stats.nba.com",
-//   "x-nba-stats-origin": "stats",
-//   "x-nba-stats-token": "true",
-//   Connection: "keep-alive",
-// };
+function computeRowChecksum(row: NormalizedPlayerRow) {
+  const joined = checksumFields.map((key) => String(row[key] ?? "")).join("|");
+  return sha256(joined);
+}
 
-// type GameRow = { game_id: string; game_date: string; matchup: string };
+async function supabaseDistinctGameIds(
+  client: SupabaseClient,
+  table: string,
+  gameIds: string[],
+  logger: Logger
+) {
+  const present = new Set<string>();
+  const chunkSize = 200;
+  for (let i = 0; i < gameIds.length; i += chunkSize) {
+    const chunk = gameIds.slice(i, i + chunkSize);
+    if (!chunk.length) continue;
+    const { data, error } = await client
+      .from(table)
+      .select("game_id")
+      .in("game_id", chunk);
+    if (error) {
+      logger.error("supabase game_id scan failed", {
+        chunkStart: i,
+        chunkSize: chunk.length,
+        error: error.message,
+      });
+      throw error;
+    }
+    (data ?? []).forEach((row: { game_id?: string }) => {
+      if (row.game_id) present.add(String(row.game_id));
+    });
+    logger.info("supabase chunk processed", {
+      chunkStart: i,
+      chunkSize: chunk.length,
+      cumulative: present.size,
+    });
+    await sleep(100);
+  }
+  return present;
+}
 
-// // -------- Utilities --------
-// function sha256(s: string) {
-//   return crypto.createHash("sha256").update(s).digest("hex");
-// }
+async function upsertRows(
+  client: SupabaseClient,
+  table: string,
+  rows: NormalizedPlayerRow[],
+  logger: Logger
+) {
+  if (!rows.length) return;
+  const stripped: UpsertPayload[] = rows.map((row) => {
+    const { row_checksum, updated_at, ...rest } = row;
+    void row_checksum;
+    void updated_at;
+    return rest;
+  });
+  const batchSize = 500;
+  for (let i = 0; i < stripped.length; i += batchSize) {
+    const batch = stripped.slice(i, i + batchSize);
+    const { error } = await client
+      .from(table)
+      .upsert(batch, { onConflict: "game_id,player_id" });
+    if (error) {
+      logger.error("supabase upsert failed", {
+        error: error.message,
+        batchStart: i,
+      });
+      throw error;
+    }
+    logger.info("upsert batch committed", {
+      batchStart: i,
+      batchSize: batch.length,
+    });
+  }
+}
 
-// function toIsoDate(d: Date) {
-//   return d.toISOString().slice(0, 10);
-// }
+export async function GET(req: NextRequest) {
+  const logger = createLogger();
+  const startedAt = Date.now();
 
-// // JSON fetch with retries
-// async function fetchJSON<T>(
-//   url: string,
-//   opts: RequestInit = {},
-//   retries = 5,
-//   backoff = 1000
-// ): Promise<T> {
-//   let lastErr: any;
-//   for (let i = 0; i < retries; i++) {
-//     try {
-//       const res = await fetch(url, { ...opts, headers: { ...NBA_HEADERS, ...(opts.headers || {}) } });
-//       if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
-//       return (await res.json()) as T;
-//     } catch (e) {
-//       lastErr = e;
-//       if (i < retries - 1) await new Promise((r) => setTimeout(r, backoff * (i + 1)));
-//     }
-//   }
-//   throw lastErr;
-// }
+  try {
+    if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE) {
+      logger.error("missing Supabase env vars");
+      return NextResponse.json(
+        { error: "Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE", logs: logger.logs },
+        { status: 500 }
+      );
+    }
 
-// // --- LeagueGameLog (team) ---
-// // Basic shape from stats.nba.com. We only use the fields we need.
-// async function fetchGames(season: string, seasonType: string, dateFrom: string, dateTo: string) {
-//   // This query mirrors nba_api's LeagueGameLog in "T" mode
-//   const params = new URLSearchParams({
-//     Counter: "10000",
-//     Direction: "ASC",
-//     LeagueID: "00",
-//     PlayerOrTeam: "T",
-//     Season: season,
-//     SeasonType: seasonType, // e.g. "Regular Season"
-//     Sorter: "DATE",
-//     DateFrom: dateFrom,
-//     DateTo: dateTo,
-//   });
+    const url = new URL(req.url);
+    const params = url.searchParams;
 
-//   type LGLResponse = {
-//     resultSets?: Array<{
-//       name: string;
-//       headers: string[];
-//       rowSet: any[][];
-//     }>;
-//     resultSet?: { // some endpoints return singular resultSet
-//       headers: string[];
-//       rowSet: any[][];
-//     };
-//   };
+    const season = params.get("season") || DEFAULT_SEASON;
+    const seasonType = params.get("seasonType") || DEFAULT_SEASON_TYPE;
+    const dateFrom = params.get("dateFrom") || tzIsoDate(DEFAULT_TIMEZONE, -10);
+    const dateTo = params.get("dateTo") || tzIsoDate(DEFAULT_TIMEZONE, 0);
+    const recentDays = Number(params.get("recentDays") || DEFAULT_RECENT_DAYS);
+    const schema = params.get("schema") || DEFAULT_SCHEMA;
+    const table = params.get("table") || DEFAULT_TABLE;
+    const dryRun = (params.get("dryRun") || "").toLowerCase() === "true";
 
-//   const json = await fetchJSON<LGLResponse>(`https://stats.nba.com/stats/leaguegamelog?${params.toString()}`);
+    logger.info("cron invoked", {
+      season,
+      seasonType,
+      dateFrom,
+      dateTo,
+      recentDays,
+      schema,
+      table,
+      dryRun,
+    });
 
-//   const rs =
-//     (json.resultSets && json.resultSets[0]) ||
-//     (json as any).resultSet ||
-//     (json as any).resultSets?.find((x: any) => x.name?.toUpperCase().includes("LEAGUEGAMELOG"));
+    const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE, {
+      auth: { persistSession: false },
+      global: { fetch },
+      db: { schema },
+    });
 
-//   if (!rs) return [] as GameRow[];
+    const games = await fetchGames(season, seasonType, dateFrom, dateTo, logger);
+    if (!games.length) {
+      logger.info("no games in range");
+      return NextResponse.json(
+        {
+          message: "No games in window",
+          params: { season, seasonType, dateFrom, dateTo },
+          logs: logger.logs,
+          durationMs: Date.now() - startedAt,
+        },
+        { status: 200 }
+      );
+    }
 
-//   const headers = rs.headers as string[];
-//   const rows = rs.rowSet as any[][];
-//   const get = (map: Record<string, number>, row: any[], key: string) => row[map[key]];
-//   const idx: Record<string, number> = {};
-//   headers.forEach((h: string, i: number) => (idx[h] = i));
+    const gameIds = games.map((g) => g.game_id);
+    logger.info("checking Supabase for existing game_ids", { total: gameIds.length });
+    const present = await supabaseDistinctGameIds(supabase as any, table, gameIds, logger);
 
-//   // Normalize
-//   const seen = new Set<string>();
-//   const out: GameRow[] = [];
-//   for (const r of rows) {
-//     const gameId = String(get(idx, r, "GAME_ID"));
-//     if (seen.has(gameId)) continue;
-//     seen.add(gameId);
+    const recentCutoff = new Date(Date.now() - recentDays * 24 * 60 * 60 * 1000);
+    const recentSet = new Set(
+      games
+        .filter((g) => g.parsedDate && g.parsedDate >= recentCutoff)
+        .map((g) => g.game_id)
+    );
+    const missing = gameIds.filter((gid) => !present.has(gid));
+    const targets = Array.from(new Set([...missing, ...Array.from(recentSet)])).sort();
 
-//     const gameDate = get(idx, r, "GAME_DATE"); // like "OCT 30, 2025"
-//     const matchup = get(idx, r, "MATCHUP");
-//     // Try to coerce to YYYY-MM-DD (stats returns US format); fallback to unchanged string
-//     const d = new Date(gameDate);
-//     const iso = isNaN(d.getTime()) ? gameDate : toIsoDate(d);
-//     out.push({ game_id: gameId, game_date: iso, matchup });
-//   }
-//   // Sort by date asc
-//   out.sort((a, b) => a.game_date.localeCompare(b.game_date));
-//   return out;
-// }
+    logger.info("target set computed", {
+      missing: missing.length,
+      recent: recentSet.size,
+      toFetch: targets.length,
+    });
 
-// // --- BoxScoreTraditionalV3 ---
-// async function fetchBoxScoreTraditionalV3(gameId: string) {
-//   type V3 = {
-//     boxScoreTraditional?: {
-//       headers?: string[];
-//       rowSet?: any[][];
-//       // Newer payload (camelCase) often at .players or .playerStats in newer APIs
-//       players?: any[];
-//       playerStats?: any[];
-//     };
-//   };
+    if (!targets.length) {
+      return NextResponse.json(
+        {
+          message: "Nothing to fetch",
+          stats: {
+            gamesInWindow: games.length,
+            missing: missing.length,
+            recent: recentSet.size,
+            targets: 0,
+          },
+          logs: logger.logs,
+          durationMs: Date.now() - startedAt,
+        },
+        { status: 200 }
+      );
+    }
 
-//   const params = new URLSearchParams({
-//     GameID: gameId,
-//     LeagueID: "00",
-//   });
-//   const json = await fetchJSON<V3>(
-//     `https://stats.nba.com/stats/boxscoretraditionalv3?${params.toString()}`,
-//     {},
-//     5,
-//     1000
-//   );
-//   return json;
-// }
+    if (dryRun) {
+      logger.info("dry run requested; skipping network calls beyond plan");
+      return NextResponse.json(
+        {
+          message: "Dry run",
+          stats: {
+            gamesInWindow: games.length,
+            missing: missing.length,
+            recent: recentSet.size,
+            targets: targets.length,
+          },
+          logs: logger.logs,
+          durationMs: Date.now() - startedAt,
+        },
+        { status: 200 }
+      );
+    }
 
-// // Try to pick the player frame, supporting both ALL_CAPS and camelCase layouts
-// function pickPlayerFrame(v3: any): any[] {
-//   // camelCase path
-//   const camel = v3?.boxScoreTraditional?.playerStats || v3?.boxScoreTraditional?.players;
-//   if (Array.isArray(camel) && camel.length) return camel;
+    logger.info("pausing before V3 requests", { delayMs: SLEEP_AFTER_LIST_MS });
+    await sleep(SLEEP_AFTER_LIST_MS);
 
-//   // ALL_CAPS path
-//   const headers = v3?.boxScoreTraditional?.headers;
-//   const rows = v3?.boxScoreTraditional?.rowSet;
-//   if (Array.isArray(headers) && Array.isArray(rows)) {
-//     const idx: Record<string, number> = {};
-//     headers.forEach((h: string, i: number) => (idx[h] = i));
-//     return rows.map((r: any[]) => {
-//       const pick = (k: string) => r[idx[k]];
-//       return {
-//         // normalize to camel-ish keys so downstream stays simple
-//         personId: pick("PLAYER_ID") ?? pick("PERSON_ID"),
-//         playerName: pick("PLAYER_NAME"),
-//         teamTricode: pick("TEAM_ABBREVIATION"),
-//         position: pick("START_POSITION"),
-//         comment: pick("COMMENT"),
-//         minutes: pick("MIN"),
-//         fieldGoalsMade: pick("FGM"),
-//         fieldGoalsAttempted: pick("FGA"),
-//         fieldGoalsPercentage: pick("FG_PCT"),
-//         threePointersMade: pick("FG3M"),
-//         threePointersAttempted: pick("FG3A"),
-//         threePointersPercentage: pick("FG3_PCT"),
-//         freeThrowsMade: pick("FTM"),
-//         freeThrowsAttempted: pick("FTA"),
-//         freeThrowsPercentage: pick("FT_PCT"),
-//         reboundsOffensive: pick("OREB"),
-//         reboundsDefensive: pick("DREB"),
-//         reboundsTotal: pick("REB"),
-//         assists: pick("AST"),
-//         steals: pick("STL"),
-//         blocks: pick("BLK"),
-//         turnovers: pick("TOV") ?? pick("TO") ?? pick("TURNOVERS"),
-//         personalFouls: pick("PF"),
-//         points: pick("PTS"),
-//         plusMinusPoints: pick("PLUS_MINUS"),
-//       };
-//     });
-//   }
-//   return [];
-// }
+    const metaById = new Map(
+      games.map((g) => [g.game_id, { game_date: g.game_date, matchup: g.matchup }])
+    );
 
-// // Normalize to your final schema keys
-// function normalizePlayerBase(rows: any[], gameId: string) {
-//   return rows.map((r) => {
-//     // Detect camelCase vs already-normalized
-//     const camel = "personId" in r || "playerSlug" in r || "firstName" in r;
+    const rowsToUpsert: NormalizedPlayerRow[] = [];
 
-//     const player_id = camel ? r.personId : r.player_id;
-//     const player_name = camel
-//       ? ((r.firstName ?? "") + " " + (r.familyName ?? "")).trim() || r.playerSlug || r.playerName
-//       : r.player_name;
-//     const team_abbr = camel ? r.teamTricode : r.team_abbr;
-//     const start_pos = camel ? r.position : r.start_pos;
-//     const comment = camel ? r.comment : r.comment;
-//     const min = camel ? r.minutes : r.min;
+    for (let i = 0; i < targets.length; i++) {
+      const gameId = targets[i];
+      logger.info("fetching game", { index: i + 1, total: targets.length, gameId });
 
-//     const fgm = camel ? r.fieldGoalsMade : r.fgm;
-//     const fga = camel ? r.fieldGoalsAttempted : r.fga;
-//     const fg_pct = camel ? r.fieldGoalsPercentage : r.fg_pct;
+      try {
+        const v3 = await fetchBoxScoreTraditionalV3(gameId, logger);
+        if (!v3) continue;
+        const players = pickPlayerFrame(v3);
+        if (!players.length) {
+          logger.warn("no player frame", { gameId });
+          continue;
+        }
 
-//     const fg3m = camel ? r.threePointersMade : r.fg3m;
-//     const fg3a = camel ? r.threePointersAttempted : r.fg3a;
-//     const fg3_pct = camel ? r.threePointersPercentage : r.fg3_pct;
+        const normalized = normalizePlayerBase(players, gameId);
+        const meta = metaById.get(gameId);
+        normalized.forEach((row) => {
+          row.game_date = meta?.game_date ?? null;
+          row.matchup = meta?.matchup ?? null;
+          row.row_checksum = computeRowChecksum(row);
+          row.updated_at = new Date().toISOString();
+        });
 
-//     const ftm = camel ? r.freeThrowsMade : r.ftm;
-//     const fta = camel ? r.freeThrowsAttempted : r.fta;
-//     const ft_pct = camel ? r.freeThrowsPercentage : r.ft_pct;
+        rowsToUpsert.push(...normalized);
+        logger.info("game normalized", {
+          gameId,
+          rows: normalized.length,
+          buffered: rowsToUpsert.length,
+        });
+      } catch (err) {
+        logger.error("game processing failed", {
+          gameId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
 
-//     const oreb = camel ? r.reboundsOffensive : r.oreb;
-//     const dreb = camel ? r.reboundsDefensive : r.dreb;
-//     const reb = camel ? r.reboundsTotal : r.reb;
+      if ((i + 1) % 10 === 0) {
+        logger.info("progress", { processedGames: i + 1, totalGames: targets.length });
+      }
 
-//     const ast = camel ? r.assists : r.ast;
-//     const stl = camel ? r.steals : r.stl;
-//     const blk = camel ? r.blocks : r.blk;
+      await sleep(SLEEP_BETWEEN_GAMES_MS);
+    }
 
-//     const tov = camel ? r.turnovers ?? r.TOV ?? r.TO : r.tov;
-//     const pf = camel ? r.personalFouls ?? r.foulsPersonal : r.pf;
+    if (!rowsToUpsert.length) {
+      logger.warn("no rows to upsert after processing");
+      return NextResponse.json(
+        {
+          message: "Nothing to write",
+          stats: {
+            gamesProcessed: targets.length,
+            rowsBuffered: 0,
+          },
+          logs: logger.logs,
+          durationMs: Date.now() - startedAt,
+        },
+        { status: 200 }
+      );
+    }
 
-//     const pts = camel ? r.points : r.pts;
-//     const plus_minus = camel ? (r.plusMinusPoints ?? r.plusMinus) : r.plus_minus;
+    logger.info("upserting rows", { count: rowsToUpsert.length });
+    await upsertRows(supabase as any, table, rowsToUpsert, logger);
 
-//     return {
-//       game_id: gameId,
-//       team_abbr,
-//       player_id,
-//       player_name,
-//       start_pos,
-//       min,
-//       fgm,
-//       fga,
-//       fg_pct,
-//       fg3m,
-//       fg3a,
-//       fg3_pct,
-//       ftm,
-//       fta,
-//       ft_pct,
-//       oreb,
-//       dreb,
-//       reb,
-//       ast,
-//       stl,
-//       blk,
-//       tov,
-//       pf,
-//       pts,
-//       plus_minus,
-//       comment,
-//     };
-//   });
-// }
+    const durationMs = Date.now() - startedAt;
+    logger.info("cron completed", {
+      durationMs,
+      gamesProcessed: targets.length,
+      rowsUpserted: rowsToUpsert.length,
+    });
 
-// function computeRowChecksum(row: any) {
-//   const keys = [
-//     "team_abbr",
-//     "player_id",
-//     "player_name",
-//     "start_pos",
-//     "min",
-//     "fgm",
-//     "fga",
-//     "fg_pct",
-//     "fg3m",
-//     "fg3a",
-//     "fg3_pct",
-//     "ftm",
-//     "fta",
-//     "ft_pct",
-//     "oreb",
-//     "dreb",
-//     "reb",
-//     "ast",
-//     "stl",
-//     "blk",
-//     "tov",
-//     "pf",
-//     "pts",
-//     "plus_minus",
-//     "comment",
-//   ];
-//   const s = keys.map((k) => String(row[k] ?? "")).join("|");
-//   return sha256(s);
-// }
-
-// // Fetch distinct game_ids already present in Supabase for the considered set
-// async function supabaseDistinctGameIds(
-//   sb: ReturnType<typeof createClient>,
-//   schema: string,
-//   table: string,
-//   gameIds: string[]
-// ) {
-//   const present = new Set<string>();
-//   const CHUNK = 200;
-//   const client = sb.from(schema);
-//   for (let i = 0; i < gameIds.length; i += CHUNK) {
-//     const chunk = gameIds.slice(i, i + CHUNK);
-//     // PostgREST: filter("game_id", "in", `(${chunk.join(",")})`) is not available in JS v2,
-//     // use .in instead:
-//     const { data, error } = await sb.from(table).select("game_id").in("game_id", chunk);
-//     if (error) throw error;
-//     (data || []).forEach((r: any) => r.game_id && present.add(String(r.game_id)));
-//     await new Promise((r) => setTimeout(r, 100));
-//   }
-//   return present;
-// }
-
-// async function upsertRows(
-//   sb: ReturnType<typeof createClient>,
-//   schema: string,
-//   table: string,
-//   rows: any[]
-// ) {
-//   if (!rows.length) return;
-//   // Strip optional columns if your table doesn't have them
-//   const cleaned = rows.map(({ row_checksum, updated_at, ...rest }) => rest);
-//   const BATCH = 500;
-//   const client = sb.schema(schema);
-//   for (let i = 0; i < cleaned.length; i += BATCH) {
-//     const batch = cleaned.slice(i, i + BATCH);
-//     const { error } = await client
-//       .from(table)
-//       .upsert(batch, { onConflict: "game_id,player_id" });
-//     if (error) throw error;
-//   }
-// }
-
-// export async function GET(req: NextRequest) {
-//   try {
-//     if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE) {
-//       return NextResponse.json(
-//         { error: "Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE env vars." },
-//         { status: 500 }
-//       );
-//     }
-
-//     const url = new URL(req.url);
-//     const q = url.searchParams;
-
-//     const season = q.get("season") || "2025-26";
-//     const seasonType = q.get("seasonType") || "Regular Season";
-
-//     // Defaults: last 10 days → today (America/Chicago)
-//     const now = new Date();
-//     const todayISO = toIsoDate(now);
-//     const tenDaysAgoISO = toIsoDate(new Date(now.getTime() - 10 * 24 * 3600 * 1000));
-
-//     const dateFrom = q.get("dateFrom") || tenDaysAgoISO;
-//     const dateTo = q.get("dateTo") || todayISO;
-
-//     const recentDays = Number(q.get("recentDays") || "7");
-//     const schema = q.get("schema") || DEFAULT_SCHEMA;
-//     const table = q.get("table") || DEFAULT_TABLE;
-//     const dryRun = (q.get("dryRun") || "").toLowerCase() === "true";
-
-//     const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE, {
-//       auth: { persistSession: false },
-//       global: { fetch }, // use Next's global fetch on Vercel
-//     });
-
-//     // 1) Enumerate games
-//     const games = await fetchGames(season, seasonType, dateFrom, dateTo);
-//     if (!games.length) {
-//       return NextResponse.json({
-//         message: "No games in range; exiting.",
-//         season,
-//         seasonType,
-//         dateFrom,
-//         dateTo,
-//       });
-//     }
-
-//     // 2) Missing + recent sets
-//     const gameIds = games.map((g) => g.game_id);
-//     const present = await supabaseDistinctGameIds(sb, schema, table, gameIds);
-
-//     const today = new Date();
-//     const recentCutoff = new Date(today.getTime() - recentDays * 24 * 3600 * 1000);
-//     const recentSet = new Set(
-//       games
-//         .filter((g) => {
-//           const d = new Date(g.game_date);
-//           return !isNaN(d.getTime()) && d >= recentCutoff;
-//         })
-//         .map((g) => g.game_id)
-//     );
-//     const missing = gameIds.filter((gid) => !present.has(gid));
-//     const target = Array.from(new Set([...missing, ...Array.from(recentSet)])).sort();
-
-//     if (dryRun) {
-//       return NextResponse.json({
-//         season,
-//         seasonType,
-//         dateFrom,
-//         dateTo,
-//         recentDays,
-//         schema,
-//         table,
-//         counts: {
-//           totalGamesInWindow: games.length,
-//           missingGames: missing.length,
-//           recentForRefresh: recentSet.size,
-//           totalToFetch: target.length,
-//         },
-//         dryRun: true,
-//       });
-//     }
-
-//     // Small pacing between list and fetches (a gentle delay)
-//     await new Promise((r) => setTimeout(r, 2000));
-
-//     const metaById = new Map(games.map((g) => [g.game_id, g]));
-//     const allUpserts: any[] = [];
-
-//     for (let i = 0; i < target.length; i++) {
-//       const gid = target[i];
-
-//       // 3) Fetch V3 + normalize
-//       const v3 = await fetchBoxScoreTraditionalV3(gid);
-//       const playerRows = pickPlayerFrame(v3);
-//       if (!playerRows || !playerRows.length) continue;
-
-//       const base = normalizePlayerBase(playerRows, gid);
-//       const meta = metaById.get(gid);
-//       for (const row of base) {
-//         // enrich + checksum + timestamps
-//         (row as any).game_date = meta?.game_date ?? null;
-//         (row as any).matchup = meta?.matchup ?? null;
-//         (row as any).row_checksum = computeRowChecksum(row);
-//         (row as any).updated_at = new Date().toISOString();
-//         allUpserts.push(row);
-//       }
-
-//       // Progress logging in response headers would be noisy; keep pacing light
-//       await new Promise((r) => setTimeout(r, 1000)); // ~1s between games
-//     }
-
-//     if (!allUpserts.length) {
-//       return NextResponse.json({
-//         message: "Nothing to write.",
-//         toFetch: target.length,
-//         windowGames: games.length,
-//       });
-//     }
-
-//     // 4) Upsert to Supabase
-//     await upsertRows(sb as any, schema, table, allUpserts);
-
-//     return NextResponse.json({
-//       message: "✅ Done",
-//       season,
-//       seasonType,
-//       dateFrom,
-//       dateTo,
-//       recentDays,
-//       schema,
-//       table,
-//       stats: {
-//         upsertedRows: allUpserts.length,
-//         gamesProcessed: target.length,
-//         windowGames: games.length,
-//       },
-//     });
-//   } catch (err: any) {
-//     return NextResponse.json({ error: String(err?.message || err) }, { status: 500 });
-//   }
-// }
+    return NextResponse.json(
+      {
+        message: "Sync complete",
+        stats: {
+          gamesInWindow: games.length,
+          gamesProcessed: targets.length,
+          rowsUpserted: rowsToUpsert.length,
+          missingGames: missing.length,
+          recentGames: recentSet.size,
+        },
+        params: { season, seasonType, dateFrom, dateTo, recentDays, schema, table },
+        durationMs,
+        logs: logger.logs,
+      },
+      { status: 200 }
+    );
+  } catch (err) {
+    logger.error("cron crashed", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return NextResponse.json(
+      {
+        error: err instanceof Error ? err.message : String(err),
+        logs: logger.logs,
+        durationMs: Date.now() - startedAt,
+      },
+      { status: 500 }
+    );
+  }
+}

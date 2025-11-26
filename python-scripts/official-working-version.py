@@ -86,9 +86,7 @@ def supa() -> Client:
     return create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE).schema(SUPABASE_SCHEMA)
 
 # ---------------------- NBA headers (important) ----------------------
-# ---------------------- NBA headers (important) ----------------------
-NBAStatsHTTP.timeout = 60  # give NBA a bit more time on GitHub runners
-
+NBAStatsHTTP.timeout = 30
 _session = requests.Session()
 _session.headers.update({
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X) AppleWebKit/537.36 "
@@ -102,17 +100,6 @@ _session.headers.update({
     "x-nba-stats-token": "true",
     "Connection": "keep-alive",
 })
-
-# ---- Decodo proxy support (GitHub Actions) ----
-# In GitHub, set DECODO_PROXY to something like:
-#   http://user:pass@proxy.decodo.io:1234
-PROXY_URL = os.getenv("DECODO_PROXY")
-if PROXY_URL:
-    _session.proxies.update({
-        "http": PROXY_URL,
-        "https": PROXY_URL,
-    })
-
 NBAStatsHTTP._session = _session
 
 

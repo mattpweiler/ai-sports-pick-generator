@@ -2,12 +2,22 @@ name: NBA Ingestion
 
 on:
   schedule:
-    - cron: "10 21 26 11 *"   # runs at 4:10pm EST on Nov 26, 2025
+    - cron: "10 21 26 11 *"   # your existing schedule
   workflow_dispatch:
 
 jobs:
   ingest:
     runs-on: ubuntu-latest
+
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE: ${{ secrets.SUPABASE_SERVICE_ROLE }}
+      SUPABASE_SCHEMA: public
+      SUPABASE_TABLE: pergame_player_base_stats_2025_26
+
+      # Route all HTTP(S) traffic (including nba_api) through Decodo on GitHub only
+      HTTP_PROXY: ${{ secrets.DECODO_PROXY }}
+      HTTPS_PROXY: ${{ secrets.DECODO_PROXY }}
 
     steps:
       - name: Checkout repo
@@ -23,12 +33,6 @@ jobs:
           pip install nba_api pandas requests supabase
 
       - name: Run ingestion script
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_ROLE: ${{ secrets.SUPABASE_SERVICE_ROLE }}
-          SUPABASE_SCHEMA: "public"
-          SUPABASE_TABLE: "pergame_player_base_stats_2025_26"
-          DECODO_PROXY: ${{ secrets.DECODO_PROXY }}
         run: |
           echo "Starting NBA ingestion..."
           python3 python-scripts/get-nba-data-works.py \

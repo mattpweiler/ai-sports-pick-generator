@@ -502,7 +502,7 @@ export async function GET(req: NextRequest) {
 
     const season = params.get("season") || DEFAULT_SEASON;
     const seasonType = params.get("seasonType") || DEFAULT_SEASON_TYPE;
-    const dateFrom = params.get("dateFrom") || tzIsoDate(DEFAULT_TIMEZONE, -10);
+    const dateFrom = params.get("dateFrom") || tzIsoDate(DEFAULT_TIMEZONE, DEFAULT_RECENT_DAYS * -1);
     const dateTo = params.get("dateTo") || tzIsoDate(DEFAULT_TIMEZONE, 0);
     const recentDays = Number(params.get("recentDays") || DEFAULT_RECENT_DAYS);
     const schema = params.get("schema") || DEFAULT_SCHEMA;

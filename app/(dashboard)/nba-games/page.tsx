@@ -69,6 +69,14 @@ type GamePlayerData =
   | { mode: "stats"; players: Player[] }
   | { mode: "roster"; roster: TeamRoster[] };
 
+type PlayerSummary = {
+  pts: number | null;
+  reb: number | null;
+  ast: number | null;
+  pra: number | null;
+  sampleSize: number;
+};
+
 type PlayersApiResponse = {
   mode?: "stats" | "roster";
   players?: Player[];
@@ -172,13 +180,15 @@ type RosterGridProps = {
   roster: TeamRoster[];
   gameId: number;
   expandedPlayers: Record<string, boolean>;
-  onToggle: (key: string) => void;
+  onToggle: (key: string, playerId?: number | null) => void;
   buildPlayerKey: (
     gameId: number,
     mode: "stats" | "roster",
     playerId: number | null | undefined,
     teamId?: number | string | null | undefined
   ) => string;
+  summaries: Record<string, PlayerSummary>;
+  summaryLoading: Record<string, boolean>;
 };
 
 function RosterGrid({
@@ -187,6 +197,8 @@ function RosterGrid({
   expandedPlayers,
   onToggle,
   buildPlayerKey,
+  summaries,
+  summaryLoading,
 }: RosterGridProps) {
   if (!roster.length) {
     return (
@@ -228,10 +240,26 @@ function RosterGrid({
                 team.team_id
               );
               const isExpanded = expandedPlayers[playerKey] ?? false;
+              const summary = summaries[playerKey];
+              const summaryLoadingFlag = summaryLoading[playerKey];
               return (
                 <div
                   key={`${team.team_id}-${player.player_id}`}
-                  className="rounded-xl border border-slate-800/60 bg-slate-900/60 px-3 py-2 text-xs text-slate-100"
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => onToggle(playerKey, player.player_id)}
+                  onKeyDown={(evt) => {
+                    if (evt.key === "Enter" || evt.key === " ") {
+                      evt.preventDefault();
+                      onToggle(playerKey, player.player_id);
+                    }
+                  }}
+                  className={[
+                    "rounded-xl border px-3 py-2 text-xs text-slate-100 transition",
+                    "border-slate-800/60 bg-slate-900/60 hover:border-cyan-400/40 hover:bg-slate-900/80",
+                    "cursor-pointer",
+                  ].join(" ")}
+                  aria-expanded={isExpanded}
                 >
                   <div className="flex items-center justify-between gap-3">
                     <div>
@@ -242,18 +270,47 @@ function RosterGrid({
                         {player.position ?? "TBD"}
                       </p>
                     </div>
-                    <button
-                      type="button"
-                      onClick={() => onToggle(playerKey)}
-                      className="text-[11px] font-semibold text-cyan-300 underline-offset-2 hover:underline"
-                      aria-expanded={isExpanded}
-                    >
+                    <span className="text-[11px] font-semibold text-cyan-300">
                       Player Overview
-                    </button>
+                    </span>
                   </div>
                   {isExpanded && (
                     <div className="mt-2 rounded-xl border border-dashed border-slate-700/70 bg-slate-950/40 px-3 py-2 text-[11px] text-slate-300">
                       <p className="mb-2">Player scouting card coming soon.</p>
+                      <div className="mb-2 rounded-lg border border-slate-800/60 bg-slate-900/40 p-2 text-[10px] uppercase tracking-wide text-slate-400">
+                        {summaryLoadingFlag ? (
+                          <p className="text-cyan-200">
+                            Loading averages…
+                          </p>
+                        ) : (
+                          <div className="grid grid-cols-2 gap-2">
+                            <span>
+                              Avg PTS:{" "}
+                              <span className="text-cyan-200">
+                                {summary?.pts ?? "—"}
+                              </span>
+                            </span>
+                            <span>
+                              Avg REB:{" "}
+                              <span className="text-cyan-200">
+                                {summary?.reb ?? "—"}
+                              </span>
+                            </span>
+                            <span>
+                              Avg AST:{" "}
+                              <span className="text-cyan-200">
+                                {summary?.ast ?? "—"}
+                              </span>
+                            </span>
+                            <span>
+                              Avg PRA:{" "}
+                              <span className="text-cyan-200">
+                                {summary?.pra ?? "—"}
+                              </span>
+                            </span>
+                          </div>
+                        )}
+                      </div>
                       {player.player_id ? (
                         <Link
                           href={`/nba-games/players/${player.player_id}`}
@@ -297,6 +354,12 @@ export default function NbaGamesPage() {
     Record<number, GamePlayerData>
   >({});
   const [expandedPlayers, setExpandedPlayers] = useState<
+    Record<string, boolean>
+  >({});
+  const [playerSummaries, setPlayerSummaries] = useState<
+    Record<string, PlayerSummary>
+  >({});
+  const [playerSummaryLoading, setPlayerSummaryLoading] = useState<
     Record<string, boolean>
   >({});
   const [loadingPlayersFor, setLoadingPlayersFor] = useState<number | null>(
@@ -373,11 +436,36 @@ export default function NbaGamesPage() {
     return `${gameId}:${mode}:${playerPart}:${teamPart}`;
   }
 
-  function togglePlayerExpansion(key: string) {
-    setExpandedPlayers((prev) => ({
-      ...prev,
-      [key]: !prev[key],
-    }));
+  async function loadPlayerSummary(playerId: number, key: string) {
+    if (!playerId || playerSummaries[key]) return;
+    setPlayerSummaryLoading((prev) => ({ ...prev, [key]: true }));
+    try {
+      const res = await fetch(`/api/players/${playerId}/summary`);
+      const json = await res.json();
+      if (res.ok && json.summary) {
+        setPlayerSummaries((prev) => ({
+          ...prev,
+          [key]: json.summary,
+        }));
+      } else {
+        console.error("Failed to load player summary:", json.error);
+      }
+    } catch (err) {
+      console.error("Error loading player summary:", err);
+    } finally {
+      setPlayerSummaryLoading((prev) => ({ ...prev, [key]: false }));
+    }
+  }
+
+  function togglePlayerExpansion(key: string, playerId?: number | null) {
+    setExpandedPlayers((prev) => {
+      const nextState = { ...prev, [key]: !prev[key] };
+      const nextExpanded = nextState[key];
+      if (nextExpanded && playerId) {
+        loadPlayerSummary(playerId, key);
+      }
+      return nextState;
+    });
   }
   
   async function handleToggleExpand(game: Game) {
@@ -550,7 +638,7 @@ export default function NbaGamesPage() {
                   }}
                   aria-pressed={isActive}
                   className={[
-                    "flex flex-col rounded-2xl border px-4 py-3 text-left transition-colors max-w-[180px]",
+                    "flex flex-col rounded-2xl border px-4 py-3 text-left transition-colors max-w-[180px] cursor-pointer",
                     isActive
                       ? "border-cyan-400 bg-cyan-500/10 text-cyan-100 shadow-lg shadow-cyan-500/20"
                       : "border-slate-800 bg-slate-900/50 text-slate-300 hover:border-cyan-500/50",
@@ -629,7 +717,7 @@ export default function NbaGamesPage() {
                           >
                             <button
                               onClick={() => handleToggleExpand(game)}
-                              className="grid grid-cols-12 items-center px-4 py-3 text-sm w-full text-left transition-colors hover:bg-slate-900/70"
+                              className="grid grid-cols-12 items-center px-4 py-3 text-sm w-full text-left transition-colors hover:bg-slate-900/70 cursor-pointer"
                             >
                               <div className="col-span-3 flex flex-col gap-0.5">
                                 <span className="text-xs font-semibold uppercase tracking-wider text-cyan-300">
@@ -750,7 +838,10 @@ export default function NbaGamesPage() {
                                               type="button"
                                               className="mt-3 text-[11px] font-semibold text-cyan-200 underline-offset-2 hover:underline"
                                               onClick={() =>
-                                                togglePlayerExpansion(playerKey)
+                                                togglePlayerExpansion(
+                                                  playerKey,
+                                                  p.player_id
+                                                )
                                               }
                                               aria-expanded={isExpanded}
                                             >
@@ -758,10 +849,44 @@ export default function NbaGamesPage() {
                                             </button>
                                             {isExpanded && (
                                               <div className="mt-2 rounded-xl border border-dashed border-cyan-400/40 bg-slate-950/40 px-3 py-2 text-[11px] text-slate-200">
-                                                <p className="mb-2">
-                                                  Player scouting card coming
-                                                  soon.
-                                                </p>
+                                                <div className="mb-2 rounded-lg border border-slate-800/60 bg-slate-900/40 p-2 text-[10px] uppercase tracking-wide text-slate-400">
+                                                  {playerSummaryLoading[playerKey] ? (
+                                                    <p className="text-cyan-200">
+                                                      Loading averages…
+                                                    </p>
+                                                  ) : (
+                                                    <div className="grid grid-cols-2 gap-2">
+                                                      <span>
+                                                        Avg PTS:{" "}
+                                                        <span className="text-cyan-200">
+                                                          {playerSummaries[playerKey]?.pts ??
+                                                            "—"}
+                                                        </span>
+                                                      </span>
+                                                      <span>
+                                                        Avg REB:{" "}
+                                                        <span className="text-cyan-200">
+                                                          {playerSummaries[playerKey]?.reb ??
+                                                            "—"}
+                                                        </span>
+                                                      </span>
+                                                      <span>
+                                                        Avg AST:{" "}
+                                                        <span className="text-cyan-200">
+                                                          {playerSummaries[playerKey]?.ast ??
+                                                            "—"}
+                                                        </span>
+                                                      </span>
+                                                      <span>
+                                                        Avg PRA:{" "}
+                                                        <span className="text-cyan-200">
+                                                          {playerSummaries[playerKey]?.pra ??
+                                                            "—"}
+                                                        </span>
+                                                      </span>
+                                                    </div>
+                                                  )}
+                                                </div>
                                                 {p.player_id ? (
                                                   <Link
                                                     href={`/nba-games/players/${p.player_id}`}
@@ -799,6 +924,8 @@ export default function NbaGamesPage() {
                                       expandedPlayers={expandedPlayers}
                                       onToggle={togglePlayerExpansion}
                                       buildPlayerKey={buildPlayerKey}
+                                      summaries={playerSummaries}
+                                      summaryLoading={playerSummaryLoading}
                                     />
                                   </div>
                                 )}

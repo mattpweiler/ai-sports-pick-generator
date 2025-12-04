@@ -19,11 +19,17 @@ type PlayerProfile = {
   availability?: PlayerAvailability | null;
 };
 
-type PlayerAverages = {
+type SampledAverages = {
   pts: number | null;
   reb: number | null;
   ast: number | null;
   sampleSize: number;
+};
+
+type PlayerAverages = {
+  last5: SampledAverages;
+  last10: SampledAverages;
+  season: SampledAverages;
 };
 
 type RecentGameStat = {
@@ -59,6 +65,34 @@ function computePra(
 ): number | null {
   if (pts === null && reb === null && ast === null) return null;
   return (pts ?? 0) + (reb ?? 0) + (ast ?? 0);
+}
+
+function summarizeAverages(rows: any[]): SampledAverages {
+  if (!rows.length) {
+    return { pts: null, reb: null, ast: null, sampleSize: 0 };
+  }
+
+  const sums = rows.reduce(
+    (acc, row) => {
+      const pts = toNumber((row as any).pts);
+      const reb = toNumber((row as any).reb);
+      const ast = toNumber((row as any).ast);
+      if (pts !== null) acc.pts += pts;
+      if (reb !== null) acc.reb += reb;
+      if (ast !== null) acc.ast += ast;
+      return acc;
+    },
+    { pts: 0, reb: 0, ast: 0 }
+  );
+
+  const sampleSize = rows.length || 1;
+
+  return {
+    pts: sampleSize ? sums.pts / sampleSize : null,
+    reb: sampleSize ? sums.reb / sampleSize : null,
+    ast: sampleSize ? sums.ast / sampleSize : null,
+    sampleSize,
+  };
 }
 
 async function fetchPlayerProfile(
@@ -136,9 +170,15 @@ async function fetchRecentAverages(
   playerId: string
 ): Promise<{ averages: PlayerAverages; games: RecentGameStat[] }> {
   const numericId = Number(playerId);
+  const emptyAverages = (): PlayerAverages => ({
+    last5: { pts: null, reb: null, ast: null, sampleSize: 0 },
+    last10: { pts: null, reb: null, ast: null, sampleSize: 0 },
+    season: { pts: null, reb: null, ast: null, sampleSize: 0 },
+  });
+
   if (Number.isNaN(numericId)) {
     return {
-      averages: { pts: null, reb: null, ast: null, sampleSize: 0 },
+      averages: emptyAverages(),
       games: [],
     };
   }
@@ -148,45 +188,30 @@ async function fetchRecentAverages(
     .select("pts, reb, ast, game_date")
     .eq("player_id", numericId)
     .order("game_date", { ascending: false })
-    .limit(5);
+    .limit(82);
 
   if (error) {
     console.error("Error fetching recent averages:", error.message ?? error);
     return {
-      averages: { pts: null, reb: null, ast: null, sampleSize: 0 },
+      averages: emptyAverages(),
       games: [],
     };
   }
 
-  const stats = (data ?? []).filter((row) => {
-    // With null ordering handling above, but keep guard
-    return row !== null;
-  });
+  const stats = (data ?? []).filter((row) => row !== null);
 
-  const sampleSize = stats.length;
-  if (!sampleSize) {
+  if (!stats.length) {
     return {
-      averages: { pts: null, reb: null, ast: null, sampleSize: 0 },
+      averages: emptyAverages(),
       games: [],
     };
   }
 
-  const sums = stats.reduce(
-    (acc, row) => {
-      const pts = toNumber((row as any).pts);
-      const reb = toNumber((row as any).reb);
-      const ast = toNumber((row as any).ast);
-      if (pts !== null) acc.pts += pts;
-      if (reb !== null) acc.reb += reb;
-      if (ast !== null) acc.ast += ast;
-      return acc;
-    },
-    { pts: 0, reb: 0, ast: 0 }
-  );
+  const fiveGameRows = stats.slice(0, 5);
+  const tenGameRows = stats.slice(0, 10);
+  const seasonRows = stats;
 
-  const divider = sampleSize || 1;
-
-  const recentGames: RecentGameStat[] = stats.map((row) => {
+  const recentGames: RecentGameStat[] = fiveGameRows.map((row) => {
     const pts = toNumber((row as any).pts);
     const reb = toNumber((row as any).reb);
     const ast = toNumber((row as any).ast);
@@ -201,10 +226,9 @@ async function fetchRecentAverages(
 
   return {
     averages: {
-      pts: sampleSize ? sums.pts / divider : null,
-      reb: sampleSize ? sums.reb / divider : null,
-      ast: sampleSize ? sums.ast / divider : null,
-      sampleSize,
+      last5: summarizeAverages(fiveGameRows),
+      last10: summarizeAverages(tenGameRows),
+      season: summarizeAverages(seasonRows),
     },
     games: recentGames,
   };
@@ -223,11 +247,18 @@ export default async function PlayerAnalysisPage({
   const displayName =
     profile?.player_name ?? `Player #${playerId}`;
   const displayTeam = profile?.team ?? "Team TBD";
-  const statCards = [
-    { label: "Points", value: averages.pts },
-    { label: "Rebounds", value: averages.reb },
-    { label: "Assists", value: averages.ast },
+  const buildStatCards = (avg: SampledAverages) => [
+    { label: "Points", value: avg.pts },
+    { label: "Rebounds", value: avg.reb },
+    { label: "Assists", value: avg.ast },
   ];
+  const fiveGameCards = buildStatCards(averages.last5);
+  const tenGameCards = buildStatCards(averages.last10);
+  const seasonCards = buildStatCards(averages.season);
+  const formatSampleSize = (sampleSize: number) =>
+    sampleSize
+      ? `Based on ${sampleSize} game${sampleSize === 1 ? "" : "s"}`
+      : "No recent games recorded";
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-black via-slate-900 to-slate-950 text-slate-50">
@@ -281,15 +312,11 @@ export default async function PlayerAnalysisPage({
               Last 5 Games (Averages)
             </p>
             <p className="text-[11px] text-slate-400">
-              {averages.sampleSize
-                ? `Based on ${averages.sampleSize} game${
-                    averages.sampleSize === 1 ? "" : "s"
-                  }`
-                : "No recent games recorded"}
+              {formatSampleSize(averages.last5.sampleSize)}
             </p>
           </div>
           <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-3">
-            {statCards.map((stat) => (
+            {fiveGameCards.map((stat) => (
               <div
                 key={stat.label}
                 className="rounded-2xl border border-cyan-500/20 bg-cyan-500/5 p-4 text-center"
@@ -303,7 +330,53 @@ export default async function PlayerAnalysisPage({
               </div>
             ))}
           </div>
-          <div className="mt-6 space-y-3">
+          <div className="mt-8 flex flex-col gap-1">
+            <p className="text-xs uppercase tracking-wide text-cyan-300">
+              Last 10 Games (Averages)
+            </p>
+            <p className="text-[11px] text-slate-400">
+              {formatSampleSize(averages.last10.sampleSize)}
+            </p>
+          </div>
+          <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-3">
+            {tenGameCards.map((stat) => (
+              <div
+                key={stat.label}
+                className="rounded-2xl border border-indigo-400/20 bg-indigo-400/5 p-4 text-center"
+              >
+                <p className="text-[11px] uppercase tracking-wider text-slate-400">
+                  {stat.label}
+                </p>
+                <p className="mt-2 text-2xl font-bold text-indigo-200">
+                  {stat.value !== null ? stat.value.toFixed(1) : "—"}
+                </p>
+              </div>
+            ))}
+          </div>
+          <div className="mt-8 flex flex-col gap-1">
+            <p className="text-xs uppercase tracking-wide text-cyan-300">
+              Season (Averages)
+            </p>
+            <p className="text-[11px] text-slate-400">
+              {formatSampleSize(averages.season.sampleSize)}
+            </p>
+          </div>
+          <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-3">
+            {seasonCards.map((stat) => (
+              <div
+                key={stat.label}
+                className="rounded-2xl border border-emerald-400/20 bg-emerald-400/5 p-4 text-center"
+              >
+                <p className="text-[11px] uppercase tracking-wider text-slate-400">
+                  {stat.label}
+                </p>
+                <p className="mt-2 text-2xl font-bold text-emerald-200">
+                  {stat.value !== null ? stat.value.toFixed(1) : "—"}
+                </p>
+              </div>
+            ))}
+          </div>
+          <div className="mt-8 space-y-3">
             {games.length > 0 && (
               <p className="text-xs uppercase tracking-wide text-slate-500">
                 Game-by-game breakdown

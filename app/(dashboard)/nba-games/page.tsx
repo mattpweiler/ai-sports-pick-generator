@@ -161,10 +161,40 @@ function getDateLabelFromKey(key: string) {
   return formatGameDateFromString(key);
 }
 
+function getScheduleDateKey(game: Game): string | null {
+  const rawDate = game.game_date?.trim();
+  if (rawDate && /^\d{4}-\d{2}-\d{2}$/.test(rawDate)) {
+    // Parse at noon UTC to avoid shifting the calendar day across time zones
+    const dt = new Date(`${rawDate}T12:00:00Z`);
+    if (!Number.isNaN(dt.getTime())) {
+      return dt.toISOString().split("T")[0];
+    }
+  }
+
+  const dt = getGameDate(game);
+  if (!dt) return null;
+  return dt.toISOString().split("T")[0];
+}
+
 function isFutureGame(game: Game) {
-  const date = getGameDate(game);
-  if (!date) return false;
-  return date.getTime() > Date.now();
+  const statusId = game.game_status_id;
+  const statusText = (game.game_status_text ?? "").toLowerCase();
+
+  // Live or final games should use stats mode.
+  if (statusId === 2 || statusText.includes("live")) return false;
+  if (statusId === 3 || statusText.includes("final")) return false;
+
+  // Fallback to date-based comparison using schedule date to avoid tz skew.
+  const gameDayKey = getScheduleDateKey(game);
+  if (!gameDayKey) return false;
+
+  const todayKey = new Date().toISOString().split("T")[0];
+
+  // Anything before today is past and should show stats.
+  if (gameDayKey < todayKey) return false;
+
+  // Today or future dates should show roster + averages (pregame view).
+  return true;
 }
 
 
@@ -276,7 +306,7 @@ function RosterGrid({
                   </div>
                   {isExpanded && (
                     <div className="mt-2 rounded-xl border border-dashed border-slate-700/70 bg-slate-950/40 px-3 py-2 text-[11px] text-slate-300">
-                      <p className="mb-2">Player scouting card coming soon.</p>
+                      <p className="mb-2">5 Game Averages</p>
                       <div className="mb-2 rounded-lg border border-slate-800/60 bg-slate-900/40 p-2 text-[10px] uppercase tracking-wide text-slate-400">
                         {summaryLoadingFlag ? (
                           <p className="text-cyan-200">

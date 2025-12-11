@@ -334,19 +334,11 @@ def main():
     ap.add_argument("--season", default=DEFAULT_SEASON)
     ap.add_argument("--season-type", default=DEFAULT_SEASON_TYPE,
                     choices=["Regular Season","Playoffs","Pre Season","All Star","PlayIn"])
-#    ap.add_argument("--date-from", default=DEFAULT_DATE_FROM, help="YYYY-MM-DD")
-#    ap.add_argument("--date-to",   default=DEFAULT_DATE_TO,   help="YYYY-MM-DD")
-    from datetime import datetime, timedelta
-    from zoneinfo import ZoneInfo
-    LOCAL_TZ = ZoneInfo("America/Chicago")
-    today_local = datetime.now(LOCAL_TZ).date()
-    default_from = (today_local - timedelta(days=10)).isoformat()
-    default_to   = today_local.isoformat()
-
-    ap.add_argument("--date-from", default=default_from,
-                    help="YYYY-MM-DD (default: 10 days ago)")
-    ap.add_argument("--date-to",   default=default_to,
-                    help="YYYY-MM-DD (default: today)")
+    # Default to full season window; override with flags if you only want a slice.
+    ap.add_argument("--date-from", default=DEFAULT_DATE_FROM,
+                    help=f"YYYY-MM-DD (default: season start {DEFAULT_DATE_FROM})")
+    ap.add_argument("--date-to",   default=DEFAULT_DATE_TO,
+                    help=f"YYYY-MM-DD (default: season end {DEFAULT_DATE_TO})")
     
     ap.add_argument("--recent-days", type=int, default=DEFAULT_RECENT_DAYS,
                     help="Also re-sync games with game_date within N days of today")

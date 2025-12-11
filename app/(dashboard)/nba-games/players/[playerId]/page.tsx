@@ -32,7 +32,7 @@ type PlayerAverages = {
   season: SampledAverages;
 };
 
-type RecentGameStat = {
+type GameStat = {
   game_date: string | null;
   pts: number | null;
   reb: number | null;
@@ -168,7 +168,11 @@ async function fetchPlayerProfile(
 
 async function fetchRecentAverages(
   playerId: string
-): Promise<{ averages: PlayerAverages; games: RecentGameStat[] }> {
+): Promise<{
+  averages: PlayerAverages;
+  games: GameStat[];
+  allGames: GameStat[];
+}> {
   const numericId = Number(playerId);
   const emptyAverages = (): PlayerAverages => ({
     last5: { pts: null, reb: null, ast: null, sampleSize: 0 },
@@ -180,6 +184,7 @@ async function fetchRecentAverages(
     return {
       averages: emptyAverages(),
       games: [],
+      allGames: [],
     };
   }
 
@@ -195,6 +200,7 @@ async function fetchRecentAverages(
     return {
       averages: emptyAverages(),
       games: [],
+      allGames: [],
     };
   }
 
@@ -204,6 +210,7 @@ async function fetchRecentAverages(
     return {
       averages: emptyAverages(),
       games: [],
+      allGames: [],
     };
   }
 
@@ -211,7 +218,7 @@ async function fetchRecentAverages(
   const tenGameRows = stats.slice(0, 10);
   const seasonRows = stats;
 
-  const recentGames: RecentGameStat[] = fiveGameRows.map((row) => {
+  const mapRowToGame = (row: any): GameStat => {
     const pts = toNumber((row as any).pts);
     const reb = toNumber((row as any).reb);
     const ast = toNumber((row as any).ast);
@@ -222,7 +229,10 @@ async function fetchRecentAverages(
       ast,
       pra: computePra(pts, reb, ast),
     };
-  });
+  };
+
+  const recentGames: GameStat[] = fiveGameRows.map(mapRowToGame);
+  const allGames: GameStat[] = seasonRows.map(mapRowToGame);
 
   return {
     averages: {
@@ -231,6 +241,7 @@ async function fetchRecentAverages(
       season: summarizeAverages(seasonRows),
     },
     games: recentGames,
+    allGames,
   };
 }
 
@@ -243,7 +254,7 @@ export default async function PlayerAnalysisPage({
     fetchRecentAverages(playerId),
   ]);
 
-  const { averages, games } = statBundle;
+  const { averages, games, allGames } = statBundle;
   const displayName =
     profile?.player_name ?? `Player #${playerId}`;
   const displayTeam = profile?.team ?? "Team TBD";
@@ -436,6 +447,48 @@ export default async function PlayerAnalysisPage({
                 </div>
               ))}
             </div>
+          </div>
+
+          <div className="mt-8 rounded-xl border border-slate-800 bg-slate-900/50 p-4">
+            <details className="group">
+              <summary className="flex cursor-pointer items-center justify-between text-xs font-semibold uppercase tracking-wide text-cyan-200">
+                <span>Full Season Game Log</span>
+                <span className="rounded-full border border-cyan-500/40 bg-cyan-500/10 px-2 py-0.5 text-[11px] text-cyan-200">
+                  {averages.season.sampleSize} total game
+                  {averages.season.sampleSize === 1 ? "" : "s"}
+                </span>
+              </summary>
+              <div className="mt-4 space-y-2 text-xs text-slate-200">
+                {allGames.length === 0 && (
+                  <p className="text-slate-400">No season games recorded.</p>
+                )}
+                {allGames.length > 0 && (
+                  <div className="grid grid-cols-1 gap-2">
+                    {allGames.map((game, idx) => (
+                      <div
+                        key={`${game.game_date ?? idx}`}
+                        className="rounded-lg border border-slate-800 bg-slate-950/60 p-3"
+                      >
+                        <div className="flex items-center justify-between text-[11px] text-slate-400 mb-2">
+                          <span>
+                            {game.game_date
+                              ? new Date(game.game_date).toLocaleDateString(
+                                  undefined,
+                                  { month: "short", day: "numeric" }
+                                )
+                              : "Unknown date"}
+                          </span>
+                          <span className="text-cyan-300">
+                            PTS {game.pts ?? "—"} · REB {game.reb ?? "—"} · AST{" "}
+                            {game.ast ?? "—"} · PRA {game.pra ?? "—"}
+                          </span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </details>
           </div>
         </section>
 

@@ -30,11 +30,6 @@ jobs:
           pip install nba_api pandas requests supabase
 
       - name: Run ingestion script
-        env:
-          DECODO_PROXY: ${{ secrets.DECODO_PROXY }}
-          # Route all HTTP(S) traffic (including nba_api) through Decodo on GitHub only
-          HTTP_PROXY: ${{ secrets.DECODO_PROXY }}
-          HTTPS_PROXY: ${{ secrets.DECODO_PROXY }}
         run: |
           echo "Starting NBA ingestion..."
           python3 python-scripts/get-nba-data-works.py \

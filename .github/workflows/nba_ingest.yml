@@ -2,7 +2,7 @@ name: NBA Ingestion
 
 on:
   schedule:
-    - cron: "6 0 * * *"   # runs daily at midnight Central Time (UTC-6)
+    - cron: "12 0 * * *"   # runs daily at midnight Central Time (UTC-6)
   workflow_dispatch:
 
 jobs:

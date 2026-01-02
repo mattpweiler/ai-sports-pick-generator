@@ -11,6 +11,7 @@ type StatRow = {
   reb: number | string | null;
   ast: number | string | null;
   game_date: string | null;
+  comment: string | null;
 };
 
 function toNumber(value: unknown): number | null {
@@ -26,6 +27,15 @@ function toNumber(value: unknown): number | null {
 
 function average(value: number, divider: number) {
   return divider ? Number((value / divider).toFixed(1)) : null;
+}
+
+const EXCLUDED_COMMENTS = new Set([
+  "DNP - Coach's Decision",
+  "DND - Injury/Illness",
+]);
+
+function shouldExcludeByComment(comment: unknown) {
+  return typeof comment === "string" && EXCLUDED_COMMENTS.has(comment.trim());
 }
 
 export async function GET(
@@ -44,10 +54,10 @@ export async function GET(
 
     const { data, error } = await supabase
       .from("pergame_player_base_stats_2025_26")
-      .select("pts, reb, ast, game_date")
+      .select("pts, reb, ast, game_date, comment")
       .eq("player_id", playerIdNum)
       .order("game_date", { ascending: false })
-      .limit(5);
+      .limit(20);
 
     if (error) {
       console.error("Error fetching player summary:", error);
@@ -58,8 +68,12 @@ export async function GET(
     }
 
     const rows = (data ?? []) as StatRow[];
+    const filteredRows = rows.filter(
+      (row) => !shouldExcludeByComment(row.comment)
+    );
+    const recentRows = filteredRows.slice(0, 5);
 
-    if (!rows.length) {
+    if (!recentRows.length) {
       return NextResponse.json({
         summary: {
           pts: null,
@@ -75,7 +89,7 @@ export async function GET(
     let rebSum = 0;
     let astSum = 0;
 
-    rows.forEach((row) => {
+    recentRows.forEach((row) => {
       const pts = toNumber(row.pts);
       const reb = toNumber(row.reb);
       const ast = toNumber(row.ast);
@@ -85,14 +99,14 @@ export async function GET(
       if (ast !== null) astSum += ast;
     });
 
-    const divider = rows.length || 1;
+    const divider = recentRows.length;
 
     const summary = {
       pts: average(ptsSum, divider),
       reb: average(rebSum, divider),
       ast: average(astSum, divider),
       pra: average(ptsSum + rebSum + astSum, divider),
-      sampleSize: rows.length,
+      sampleSize: recentRows.length,
     };
 
     return NextResponse.json({ summary });

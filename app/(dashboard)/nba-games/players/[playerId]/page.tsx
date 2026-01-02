@@ -47,6 +47,15 @@ type PlayerAvailability = {
   effective_from: string;
 };
 
+const EXCLUDED_COMMENTS = new Set([
+  "DNP - Coach's Decision",
+  "DND - Injury/Illness",
+]);
+
+function shouldExcludeByComment(comment: unknown) {
+  return typeof comment === "string" && EXCLUDED_COMMENTS.has(comment.trim());
+}
+
 function toNumber(value: unknown): number | null {
   if (typeof value === "number") {
     return Number.isFinite(value) ? value : null;
@@ -190,7 +199,7 @@ async function fetchRecentAverages(
 
   const { data, error } = await supabase
     .from("pergame_player_base_stats_2025_26")
-    .select("pts, reb, ast, game_date")
+    .select("pts, reb, ast, game_date, comment")
     .eq("player_id", numericId)
     .order("game_date", { ascending: false })
     .limit(82);
@@ -205,8 +214,11 @@ async function fetchRecentAverages(
   }
 
   const stats = (data ?? []).filter((row) => row !== null);
+  const filteredStats = stats.filter(
+    (row) => !shouldExcludeByComment((row as any).comment)
+  );
 
-  if (!stats.length) {
+  if (!filteredStats.length) {
     return {
       averages: emptyAverages(),
       games: [],
@@ -214,9 +226,9 @@ async function fetchRecentAverages(
     };
   }
 
-  const fiveGameRows = stats.slice(0, 5);
-  const tenGameRows = stats.slice(0, 10);
-  const seasonRows = stats;
+  const fiveGameRows = filteredStats.slice(0, 5);
+  const tenGameRows = filteredStats.slice(0, 10);
+  const seasonRows = filteredStats;
 
   const mapRowToGame = (row: any): GameStat => {
     const pts = toNumber((row as any).pts);

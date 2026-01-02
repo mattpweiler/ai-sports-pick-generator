@@ -161,6 +161,10 @@ function getDateLabelFromKey(key: string) {
   return formatGameDateFromString(key);
 }
 
+function isCupFinalDate(key: string) {
+  return /-12-16$/.test(key);
+}
+
 function getScheduleDateKey(game: Game): string | null {
   const rawDate = game.game_date?.trim();
   if (rawDate && /^\d{4}-\d{2}-\d{2}$/.test(rawDate)) {
@@ -704,6 +708,7 @@ export default function NbaGamesPage() {
             <div className="divide-y divide-slate-800">
               {dateSections.map(([dateKey, dateGames]) => {
                 const expanded = isDateExpanded(dateKey);
+                const showCupFinalsNote = isCupFinalDate(dateKey);
                 return (
                   <div key={dateKey} className="border-b border-slate-800/50">
                     <button
@@ -725,6 +730,12 @@ export default function NbaGamesPage() {
                         {expanded ? "Hide" : "Show"}
                       </span>
                     </button>
+
+                    {showCupFinalsNote && (
+                      <div className="border-y border-amber-500/30 bg-amber-500/5 px-4 py-2 text-[11px] font-semibold uppercase tracking-wide text-amber-200">
+                        The NBA Cup Finals did not count towards stats.
+                      </div>
+                    )}
 
                     {expanded &&
                       dateGames.map((game) => {

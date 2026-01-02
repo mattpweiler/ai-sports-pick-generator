@@ -50,6 +50,8 @@ type PlayerAvailability = {
 const EXCLUDED_COMMENTS = new Set([
   "DNP - Coach's Decision",
   "DND - Injury/Illness",
+  "NWT - Not With Team",
+  "NWT - Injury/Illness",
 ]);
 
 function shouldExcludeByComment(comment: unknown) {
@@ -74,6 +76,20 @@ function computePra(
 ): number | null {
   if (pts === null && reb === null && ast === null) return null;
   return (pts ?? 0) + (reb ?? 0) + (ast ?? 0);
+}
+
+function parseGameDate(value: string | null): Date | null {
+  if (!value) return null;
+  const raw = value.trim();
+  const isoLike = /^\d{4}-\d{2}-\d{2}$/.test(raw);
+  const dt = isoLike ? new Date(`${raw}T12:00:00Z`) : new Date(raw);
+  return Number.isNaN(dt.getTime()) ? null : dt;
+}
+
+function formatGameDate(value: string | null): string {
+  const dt = parseGameDate(value);
+  if (!dt) return "Unknown date";
+  return dt.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
 function summarizeAverages(rows: any[]): SampledAverages {
@@ -413,12 +429,7 @@ export default async function PlayerAnalysisPage({
                 >
                   <div className="flex items-center justify-between text-xs text-slate-400 mb-2">
                     <span>
-                      {game.game_date
-                        ? new Date(game.game_date).toLocaleDateString(undefined, {
-                            month: "short",
-                            day: "numeric",
-                          })
-                        : "Unknown date"}
+                      {formatGameDate(game.game_date)}
                     </span>
                     <span>{games.length - idx === 1 ? "Most recent" : ""}</span>
                   </div>
@@ -483,12 +494,7 @@ export default async function PlayerAnalysisPage({
                       >
                         <div className="flex items-center justify-between text-[11px] text-slate-400 mb-2">
                           <span>
-                            {game.game_date
-                              ? new Date(game.game_date).toLocaleDateString(
-                                  undefined,
-                                  { month: "short", day: "numeric" }
-                                )
-                              : "Unknown date"}
+                            {formatGameDate(game.game_date)}
                           </span>
                           <span className="text-cyan-300">
                             PTS {game.pts ?? "—"} · REB {game.reb ?? "—"} · AST{" "}

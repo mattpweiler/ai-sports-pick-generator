@@ -32,6 +32,8 @@ function average(value: number, divider: number) {
 const EXCLUDED_COMMENTS = new Set([
   "DNP - Coach's Decision",
   "DND - Injury/Illness",
+  "NWT - Not With Team",
+  "NWT - Injury/Illness",
 ]);
 
 function shouldExcludeByComment(comment: unknown) {

@@ -10,6 +10,9 @@ type StatRow = {
   pts: number | string | null;
   reb: number | string | null;
   ast: number | string | null;
+  stl: number | string | null;
+  blk: number | string | null;
+  tov: number | string | null;
   game_date: string | null;
   comment: string | null;
 };
@@ -56,7 +59,7 @@ export async function GET(
 
     const { data, error } = await supabase
       .from("pergame_player_base_stats_2025_26")
-      .select("pts, reb, ast, game_date, comment")
+      .select("pts, reb, ast, stl, blk, tov, game_date, comment")
       .eq("player_id", playerIdNum)
       .order("game_date", { ascending: false })
       .limit(20);
@@ -81,6 +84,9 @@ export async function GET(
           pts: null,
           reb: null,
           ast: null,
+          stl: null,
+          blk: null,
+          tov: null,
           pra: null,
           sampleSize: 0,
         },
@@ -90,15 +96,24 @@ export async function GET(
     let ptsSum = 0;
     let rebSum = 0;
     let astSum = 0;
+    let stlSum = 0;
+    let blkSum = 0;
+    let tovSum = 0;
 
     recentRows.forEach((row) => {
       const pts = toNumber(row.pts);
       const reb = toNumber(row.reb);
       const ast = toNumber(row.ast);
+      const stl = toNumber(row.stl);
+      const blk = toNumber(row.blk);
+      const tov = toNumber(row.tov);
 
       if (pts !== null) ptsSum += pts;
       if (reb !== null) rebSum += reb;
       if (ast !== null) astSum += ast;
+      if (stl !== null) stlSum += stl;
+      if (blk !== null) blkSum += blk;
+      if (tov !== null) tovSum += tov;
     });
 
     const divider = recentRows.length;
@@ -107,6 +122,9 @@ export async function GET(
       pts: average(ptsSum, divider),
       reb: average(rebSum, divider),
       ast: average(astSum, divider),
+      stl: average(stlSum, divider),
+      blk: average(blkSum, divider),
+      tov: average(tovSum, divider),
       pra: average(ptsSum + rebSum + astSum, divider),
       sampleSize: recentRows.length,
     };

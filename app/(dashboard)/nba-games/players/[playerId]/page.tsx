@@ -23,6 +23,10 @@ type SampledAverages = {
   pts: number | null;
   reb: number | null;
   ast: number | null;
+  pra: number | null;
+  stl: number | null;
+  blk: number | null;
+  tov: number | null;
   sampleSize: number;
 };
 
@@ -37,7 +41,13 @@ type GameStat = {
   pts: number | null;
   reb: number | null;
   ast: number | null;
+  stl: number | null;
+  blk: number | null;
+  tov: number | null;
   pra: number | null;
+  matchup?: string | null;
+  team_abbr?: string | null;
+  opponent?: string | null;
 };
 
 type PlayerAvailability = {
@@ -92,9 +102,42 @@ function formatGameDate(value: string | null): string {
   return dt.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
+function getOpponentLabel(matchup: string | null, teamAbbr: string | null) {
+  if (!matchup) return null;
+  const trimmed = matchup.trim();
+  const match = trimmed.match(
+    /([A-Z]{2,4})\s*(vs\.?|@)\s*([A-Z]{2,4})/i
+  );
+
+  if (!match) return trimmed || null;
+
+  const [, leftRaw, sepRaw, rightRaw] = match;
+  const left = leftRaw.toUpperCase();
+  const right = rightRaw.toUpperCase();
+  const sep = sepRaw.includes("@") ? "@" : "vs";
+  const team = teamAbbr ? teamAbbr.toUpperCase() : null;
+
+  if (team === left) {
+    return sep === "@" ? `@ ${right}` : `vs ${right}`;
+  }
+  if (team === right) {
+    return sep === "@" ? `vs ${left}` : `@ ${left}`;
+  }
+  return trimmed || null;
+}
+
 function summarizeAverages(rows: any[]): SampledAverages {
   if (!rows.length) {
-    return { pts: null, reb: null, ast: null, sampleSize: 0 };
+    return {
+      pts: null,
+      reb: null,
+      ast: null,
+      pra: null,
+      stl: null,
+      blk: null,
+      tov: null,
+      sampleSize: 0,
+    };
   }
 
   const sums = rows.reduce(
@@ -102,12 +145,18 @@ function summarizeAverages(rows: any[]): SampledAverages {
       const pts = toNumber((row as any).pts);
       const reb = toNumber((row as any).reb);
       const ast = toNumber((row as any).ast);
+      const stl = toNumber((row as any).stl);
+      const blk = toNumber((row as any).blk);
+      const tov = toNumber((row as any).tov);
       if (pts !== null) acc.pts += pts;
       if (reb !== null) acc.reb += reb;
       if (ast !== null) acc.ast += ast;
+      if (stl !== null) acc.stl += stl;
+      if (blk !== null) acc.blk += blk;
+      if (tov !== null) acc.tov += tov;
       return acc;
     },
-    { pts: 0, reb: 0, ast: 0 }
+    { pts: 0, reb: 0, ast: 0, stl: 0, blk: 0, tov: 0 }
   );
 
   const sampleSize = rows.length || 1;
@@ -116,6 +165,10 @@ function summarizeAverages(rows: any[]): SampledAverages {
     pts: sampleSize ? sums.pts / sampleSize : null,
     reb: sampleSize ? sums.reb / sampleSize : null,
     ast: sampleSize ? sums.ast / sampleSize : null,
+    pra: sampleSize ? (sums.pts + sums.reb + sums.ast) / sampleSize : null,
+    stl: sampleSize ? sums.stl / sampleSize : null,
+    blk: sampleSize ? sums.blk / sampleSize : null,
+    tov: sampleSize ? sums.tov / sampleSize : null,
     sampleSize,
   };
 }
@@ -200,9 +253,36 @@ async function fetchRecentAverages(
 }> {
   const numericId = Number(playerId);
   const emptyAverages = (): PlayerAverages => ({
-    last5: { pts: null, reb: null, ast: null, sampleSize: 0 },
-    last10: { pts: null, reb: null, ast: null, sampleSize: 0 },
-    season: { pts: null, reb: null, ast: null, sampleSize: 0 },
+    last5: {
+      pts: null,
+      reb: null,
+      ast: null,
+      pra: null,
+      stl: null,
+      blk: null,
+      tov: null,
+      sampleSize: 0,
+    },
+    last10: {
+      pts: null,
+      reb: null,
+      ast: null,
+      pra: null,
+      stl: null,
+      blk: null,
+      tov: null,
+      sampleSize: 0,
+    },
+    season: {
+      pts: null,
+      reb: null,
+      ast: null,
+      pra: null,
+      stl: null,
+      blk: null,
+      tov: null,
+      sampleSize: 0,
+    },
   });
 
   if (Number.isNaN(numericId)) {
@@ -215,7 +295,9 @@ async function fetchRecentAverages(
 
   const { data, error } = await supabase
     .from("pergame_player_base_stats_2025_26")
-    .select("pts, reb, ast, game_date, comment")
+    .select(
+      "pts, reb, ast, stl, blk, tov, game_date, comment, team_abbr, matchup"
+    )
     .eq("player_id", numericId)
     .order("game_date", { ascending: false })
     .limit(82);
@@ -250,12 +332,23 @@ async function fetchRecentAverages(
     const pts = toNumber((row as any).pts);
     const reb = toNumber((row as any).reb);
     const ast = toNumber((row as any).ast);
+    const stl = toNumber((row as any).stl);
+    const blk = toNumber((row as any).blk);
+    const tov = toNumber((row as any).tov);
+    const teamAbbr = (row as any).team_abbr as string | null;
+    const matchup = (row as any).matchup as string | null;
     return {
       game_date: (row as any).game_date,
       pts,
       reb,
       ast,
+      stl,
+      blk,
+      tov,
       pra: computePra(pts, reb, ast),
+      team_abbr: teamAbbr,
+      matchup,
+      opponent: getOpponentLabel(matchup, teamAbbr),
     };
   };
 
@@ -290,6 +383,10 @@ export default async function PlayerAnalysisPage({
     { label: "Points", value: avg.pts },
     { label: "Rebounds", value: avg.reb },
     { label: "Assists", value: avg.ast },
+    { label: "PRA", value: avg.pra },
+    { label: "Steals", value: avg.stl },
+    { label: "Blocks", value: avg.blk },
+    { label: "Turnovers", value: avg.tov },
   ];
   const fiveGameCards = buildStatCards(averages.last5);
   const tenGameCards = buildStatCards(averages.last10);
@@ -354,7 +451,7 @@ export default async function PlayerAnalysisPage({
               {formatSampleSize(averages.last5.sampleSize)}
             </p>
           </div>
-          <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-3">
+          <div className="mt-4 grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
             {fiveGameCards.map((stat) => (
               <div
                 key={stat.label}
@@ -377,7 +474,7 @@ export default async function PlayerAnalysisPage({
               {formatSampleSize(averages.last10.sampleSize)}
             </p>
           </div>
-          <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-3">
+          <div className="mt-4 grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
             {tenGameCards.map((stat) => (
               <div
                 key={stat.label}
@@ -400,7 +497,7 @@ export default async function PlayerAnalysisPage({
               {formatSampleSize(averages.season.sampleSize)}
             </p>
           </div>
-          <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-3">
+          <div className="mt-4 grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
             {seasonCards.map((stat) => (
               <div
                 key={stat.label}
@@ -433,39 +530,25 @@ export default async function PlayerAnalysisPage({
                     </span>
                     <span>{games.length - idx === 1 ? "Most recent" : ""}</span>
                   </div>
-                  <div className="grid grid-cols-4 gap-2 text-center">
-                    <div>
-                      <p className="text-[11px] uppercase tracking-wider text-slate-500">
-                        PTS
-                      </p>
-                      <p className="text-lg font-semibold text-cyan-200">
-                        {game.pts ?? "—"}
-                      </p>
-                    </div>
-                    <div>
-                      <p className="text-[11px] uppercase tracking-wider text-slate-500">
-                        REB
-                      </p>
-                      <p className="text-lg font-semibold text-cyan-200">
-                        {game.reb ?? "—"}
-                      </p>
-                    </div>
-                    <div>
-                      <p className="text-[11px] uppercase tracking-wider text-slate-500">
-                        AST
-                      </p>
-                      <p className="text-lg font-semibold text-cyan-200">
-                        {game.ast ?? "—"}
-                      </p>
-                    </div>
-                    <div>
-                      <p className="text-[11px] uppercase tracking-wider text-slate-500">
-                        PRA
-                      </p>
-                      <p className="text-lg font-semibold text-cyan-200">
-                        {game.pra ?? "—"}
-                      </p>
-                    </div>
+                  <div className="grid grid-cols-3 gap-2 text-center sm:grid-cols-4 md:grid-cols-7">
+                    {[
+                      { label: "PTS", value: game.pts },
+                      { label: "REB", value: game.reb },
+                      { label: "AST", value: game.ast },
+                      { label: "STL", value: game.stl },
+                      { label: "BLK", value: game.blk },
+                      { label: "TOV", value: game.tov },
+                      { label: "PRA", value: game.pra },
+                    ].map((stat) => (
+                      <div key={stat.label}>
+                        <p className="text-[11px] uppercase tracking-wider text-slate-500">
+                          {stat.label}
+                        </p>
+                        <p className="text-lg font-semibold text-cyan-200">
+                          {stat.value ?? "—"}
+                        </p>
+                      </div>
+                    ))}
                   </div>
                 </div>
               ))}
@@ -495,10 +578,17 @@ export default async function PlayerAnalysisPage({
                         <div className="flex items-center justify-between text-[11px] text-slate-400 mb-2">
                           <span>
                             {formatGameDate(game.game_date)}
+                            {game.opponent
+                              ? ` · ${game.opponent}`
+                              : game.matchup
+                              ? ` · ${game.matchup}`
+                              : ""}
                           </span>
                           <span className="text-cyan-300">
                             PTS {game.pts ?? "—"} · REB {game.reb ?? "—"} · AST{" "}
-                            {game.ast ?? "—"} · PRA {game.pra ?? "—"}
+                            {game.ast ?? "—"} · STL {game.stl ?? "—"} · BLK{" "}
+                            {game.blk ?? "—"} · TOV {game.tov ?? "—"} · PRA{" "}
+                            {game.pra ?? "—"}
                           </span>
                         </div>
                       </div>

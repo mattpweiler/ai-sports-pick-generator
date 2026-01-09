@@ -629,11 +629,6 @@ export default function NbaGamesPage() {
               <p className="text-xs text-slate-400">Game tracker 🐾</p>
             </div>
           </div>
-
-          <div className="hidden items-center gap-2 rounded-full bg-slate-900/80 px-4 py-2 text-xs font-medium text-slate-300 shadow-lg shadow-cyan-500/20 md:flex">
-            <span className="mr-1 inline-block h-2 w-2 rounded-full bg-cyan-400" />
-            Live data from Supabase
-          </div>
         </div>
       </header>
 

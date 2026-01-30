@@ -3,6 +3,10 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
+import type { FormEvent } from "react";
+import { AiGameProjectionsResponse } from "@/lib/aiPredictions";
+import { ExplanationCell } from "../components/ExplanationCell";
+import { DEFAULT_MODEL_VERSION } from "@/lib/predictions";
 
 type Game = {
   game_id: number;
@@ -346,12 +350,20 @@ function RosterGrid({
                         )}
                       </div>
                       {player.player_id ? (
-                        <Link
-                          href={`/nba-games/players/${player.player_id}`}
-                          className="inline-flex items-center justify-center rounded-full border border-cyan-400/60 bg-cyan-500/10 px-3 py-1 text-[11px] font-semibold text-cyan-200 hover:bg-cyan-500/20 transition"
-                        >
-                          Get Advanced AI Analysis on Player
-                        </Link>
+                        <div className="flex flex-wrap gap-2">
+                          <Link
+                            href={`/predictions?playerId=${player.player_id}&gameId=${gameId}`}
+                            className="inline-flex items-center justify-center rounded-full border border-emerald-400/60 bg-emerald-500/10 px-3 py-1 text-[11px] font-semibold text-emerald-200 hover:bg-emerald-500/20 transition"
+                          >
+                            View Predictions
+                          </Link>
+                          <Link
+                            href={`/nba-games/players/${player.player_id}`}
+                            className="inline-flex items-center justify-center rounded-full border border-cyan-400/60 bg-cyan-500/10 px-3 py-1 text-[11px] font-semibold text-cyan-200 hover:bg-cyan-500/20 transition"
+                          >
+                            Player Deep Dive
+                          </Link>
+                        </div>
                       ) : (
                         <button
                           type="button"
@@ -399,6 +411,17 @@ export default function NbaGamesPage() {
   const [loadingPlayersFor, setLoadingPlayersFor] = useState<number | null>(
     null
   );
+  const [aiModalGameId, setAiModalGameId] = useState<number | null>(null);
+  const [aiContext, setAiContext] = useState("");
+  const [aiUseMlBaseline, setAiUseMlBaseline] = useState(true);
+  const [aiModelVersion, setAiModelVersion] =
+    useState<string>(DEFAULT_MODEL_VERSION);
+  const [aiModelVersions, setAiModelVersions] = useState<string[]>([]);
+  const [aiResults, setAiResults] = useState<
+    Record<number, AiGameProjectionsResponse>
+  >({});
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiError, setAiError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -415,7 +438,31 @@ export default function NbaGamesPage() {
         setTeams(map);
       }
     }
-    
+
+    async function loadModelVersions() {
+      try {
+        const res = await fetch("/api/ml-model-versions");
+        const json = await res.json();
+        if (!cancelled && res.ok) {
+          const versions = Array.isArray(json.versions)
+            ? json.versions
+            : [];
+          setAiModelVersions(versions);
+          setAiModelVersion(
+            versions[0] ? String(versions[0]) : DEFAULT_MODEL_VERSION
+          );
+        } else if (!cancelled) {
+          throw new Error(json.error || "Failed to load model versions.");
+        }
+      } catch (err) {
+        if (!cancelled) {
+          console.warn("Model versions fetch failed:", err);
+          setAiModelVersions([DEFAULT_MODEL_VERSION]);
+          setAiModelVersion(DEFAULT_MODEL_VERSION);
+        }
+      }
+    }
+
     async function loadGames() {
       try {
         const res = await fetch("/api/nba-games");
@@ -441,6 +488,7 @@ export default function NbaGamesPage() {
 
     loadGames();
     loadTeams();
+    loadModelVersions();
 
     return () => {
       cancelled = true;
@@ -500,6 +548,241 @@ export default function NbaGamesPage() {
       }
       return nextState;
     });
+  }
+
+  function getPlayerNameFromGame(gameId: number, playerId: number) {
+    const data = gamePlayerData[gameId];
+    if (data?.mode === "stats") {
+      const found = data.players.find((p) => p.player_id === playerId);
+      if (found?.player_name) return found.player_name;
+    }
+    if (data?.mode === "roster") {
+      for (const team of data.roster) {
+        const found = team.players.find((p) => p.player_id === playerId);
+        if (found?.player_name) return found.player_name;
+      }
+    }
+    return `Player ${playerId}`;
+  }
+
+  function openAiModal(gameId: number) {
+    setAiModalGameId(gameId);
+    setAiError(null);
+  }
+
+  function closeAiModal() {
+    if (aiLoading) return;
+    setAiModalGameId(null);
+    setAiError(null);
+  }
+
+  function confidenceClass(confidence: number | null | undefined) {
+    if (confidence !== null && confidence !== undefined && confidence >= 0.75) {
+      return "bg-emerald-500/15 text-emerald-200 border-emerald-500/50";
+    }
+    if (confidence !== null && confidence !== undefined && confidence >= 0.55) {
+      return "bg-amber-500/15 text-amber-200 border-amber-500/50";
+    }
+    return "bg-slate-500/20 text-slate-200 border-slate-500/40";
+  }
+
+  function confidenceLabel(confidence: number | null | undefined) {
+    if (confidence === null || confidence === undefined) return "—";
+    if (confidence >= 0.75) return "High";
+    if (confidence >= 0.55) return "Medium";
+    return "Low";
+  }
+
+  async function handleSubmitAiPrediction(evt: FormEvent<HTMLFormElement>) {
+    evt.preventDefault();
+    if (!aiModalGameId) return;
+    setAiLoading(true);
+    setAiError(null);
+    try {
+      const res = await fetch("/api/ai/game-projections", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          game_id: aiModalGameId,
+          model_version: aiModelVersion,
+          user_notes: aiContext,
+        }),
+      });
+      const json: AiGameProjectionsResponse | { error?: string } =
+        await res.json();
+      if (!res.ok) {
+        throw new Error((json as any).error || "Failed to generate AI output.");
+      }
+      setAiResults((prev) => ({
+        ...prev,
+        [aiModalGameId]: json as AiGameProjectionsResponse,
+      }));
+      setAiModalGameId(null);
+    } catch (err) {
+      console.error("AI prediction error:", err);
+      const message =
+        err instanceof Error
+          ? err.message
+          : "Failed to generate AI predictions.";
+      setAiError(message);
+    } finally {
+      setAiLoading(false);
+    }
+  }
+
+  function renderAiSection(game: Game) {
+    const aiResult = aiResults[game.game_id];
+    const grouped = aiResult
+      ? aiResult.players.reduce<Record<string, typeof aiResult.players>>(
+          (acc, player) => {
+            const key = player.team_abbr || "UNK";
+            if (!acc[key]) acc[key] = [];
+            acc[key].push(player);
+            return acc;
+          },
+          {}
+        )
+      : {};
+    const generatedAt =
+      aiResult?.generated_at && !Number.isNaN(new Date(aiResult.generated_at).getTime())
+        ? new Date(aiResult.generated_at).toLocaleString()
+        : null;
+
+    return (
+      <div className="mt-5 rounded-2xl border border-cyan-500/30 bg-slate-950/60 p-4">
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+          <div>
+            <p className="text-xs uppercase tracking-wide text-cyan-300">
+              AI Predictions
+            </p>
+            <p className="text-sm text-slate-300">
+              Suggested lines for every expected active player.
+            </p>
+            {generatedAt && (
+              <p className="text-[11px] text-slate-400">
+                Generated {generatedAt} • Model {aiResult?.model_version}
+              </p>
+            )}
+          </div>
+          <button
+            type="button"
+            onClick={() => openAiModal(game.game_id)}
+            className="inline-flex items-center justify-center rounded-full border border-cyan-500/60 bg-cyan-500/10 px-4 py-2 text-[11px] font-semibold text-cyan-100 shadow-cyan-500/30 transition hover:bg-cyan-500/20"
+          >
+            Generate AI Predictions
+          </button>
+        </div>
+
+        {aiResult?.assumptions?.length ? (
+          <div className="mt-3 flex flex-wrap gap-2">
+            {aiResult.assumptions.map((assumption: string, idx: number) => (
+              <span
+                key={`${assumption}-${idx}`}
+                className="rounded-full border border-slate-700 bg-slate-800/70 px-3 py-1 text-[11px] text-slate-200"
+              >
+                {assumption}
+              </span>
+            ))}
+          </div>
+        ) : (
+          <p className="mt-2 text-[11px] text-slate-500">
+            Use the button to generate game-level notes and per-player lines.
+          </p>
+        )}
+
+        {aiResult ? (
+          <div className="mt-4 space-y-4">
+            {Object.entries(grouped).map(([team, players]) => (
+              <div
+                key={team}
+                className="rounded-xl border border-slate-800 bg-slate-900/60 p-3"
+              >
+                <div className="mb-2 flex items-center justify-between">
+                  <p className="text-sm font-semibold text-cyan-200">
+                    {team}
+                  </p>
+                  <span className="text-[11px] text-slate-400">
+                    {players.length} player{players.length > 1 ? "s" : ""}
+                  </span>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="min-w-full text-left text-xs text-slate-200">
+                    <thead>
+                      <tr className="text-[11px] uppercase tracking-wide text-slate-400">
+                        <th className="px-2 py-2">Player</th>
+                        <th className="px-2 py-2 text-right">Min</th>
+                        <th className="px-2 py-2 text-right">PTS</th>
+                        <th className="px-2 py-2 text-right">REB</th>
+                        <th className="px-2 py-2 text-right">AST</th>
+                        <th className="px-2 py-2 text-right">PRA</th>
+                        <th className="px-2 py-2">Confidence</th>
+                        <th className="px-2 py-2">Explanation</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {players
+                        .slice()
+                        .sort((a, b) => b.final.minutes - a.final.minutes)
+                        .map((player) => (
+                          <tr
+                            key={`${player.player_id}-${player.team_abbr}`}
+                            className="border-t border-slate-800/70 hover:bg-slate-800/40"
+                          >
+                            <td className="px-2 py-2 font-semibold text-slate-100">
+                              {getPlayerNameFromGame(
+                                game.game_id,
+                                player.player_id
+                              )}
+                            </td>
+                            <td className="px-2 py-2 text-right">
+                              {player.final.minutes.toFixed(1)}
+                            </td>
+                            <td className="px-2 py-2 text-right">
+                              {player.final.pts.toFixed(1)}
+                            </td>
+                            <td className="px-2 py-2 text-right">
+                              {player.final.reb.toFixed(1)}
+                            </td>
+                            <td className="px-2 py-2 text-right">
+                              {player.final.ast.toFixed(1)}
+                            </td>
+                            <td className="px-2 py-2 text-right">
+                              {player.final.pra.toFixed(1)}
+                            </td>
+                          <td className="px-2 py-2">
+                            <span
+                              className={[
+                                "inline-flex rounded-full border px-2 py-1 text-[11px] font-semibold",
+                                confidenceClass(player.final.confidence),
+                              ].join(" ")}
+                            >
+                              {confidenceLabel(player.final.confidence)}
+                            </span>
+                          </td>
+                          <td className="px-2 py-2">
+                            <ExplanationCell
+                              gameId={game.game_id}
+                              playerId={player.player_id}
+                              playerName={getPlayerNameFromGame(
+                                game.game_id,
+                                player.player_id
+                              )}
+                              modelVersion={aiResult.model_version}
+                              finalStats={player.final}
+                              userNotes={aiContext}
+                            />
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : null}
+      </div>
+    );
   }
   
   async function handleToggleExpand(game: Game) {
@@ -614,6 +897,117 @@ export default function NbaGamesPage() {
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-black via-slate-900 to-slate-950 text-slate-50">
+      {aiModalGameId !== null && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4 py-6">
+          <div className="w-full max-w-2xl rounded-2xl border border-cyan-500/40 bg-slate-950 p-6 shadow-2xl shadow-cyan-500/20">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <p className="text-xs uppercase tracking-wide text-cyan-300">
+                  AI Predictions
+                </p>
+                <h2 className="text-lg font-semibold text-slate-50">
+                  Generate projections for Game #{aiModalGameId}
+                </h2>
+                <p className="text-sm text-slate-400">
+                  We will cache identical requests (game + context + model version).
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={closeAiModal}
+                className="rounded-full border border-slate-700 bg-slate-800/70 px-3 py-1 text-xs font-semibold text-slate-200 hover:border-slate-500"
+              >
+                Close
+              </button>
+            </div>
+
+            <form className="mt-4 space-y-4" onSubmit={handleSubmitAiPrediction}>
+              <div>
+                <label className="text-xs font-semibold uppercase tracking-wide text-slate-300">
+                  Context (injuries/news/trends)
+                </label>
+                <textarea
+                  value={aiContext}
+                  onChange={(e) => setAiContext(e.target.value)}
+                  rows={4}
+                  className="mt-2 w-full rounded-xl border border-slate-800 bg-slate-900/70 p-3 text-sm text-slate-100 focus:border-cyan-400 focus:outline-none"
+                  placeholder="Giannis questionable ankle; coach said minutes limit; Bucks on B2B; team playing faster lately; role changes…"
+                />
+                <p className="mt-1 text-[11px] text-slate-400">
+                  These notes are treated as facts (out, questionable, blowout risk, pace up, minutes limit).
+                </p>
+              </div>
+
+              <div className="grid gap-4 sm:grid-cols-2">
+                <div>
+                  <label className="text-xs font-semibold uppercase tracking-wide text-slate-300">
+                    Model version
+                  </label>
+                  <select
+                    value={aiModelVersion}
+                    onChange={(e) => setAiModelVersion(e.target.value)}
+                    className="mt-2 w-full rounded-xl border border-slate-800 bg-slate-900/70 p-3 text-sm text-slate-100 focus:border-cyan-400 focus:outline-none"
+                  >
+                    {(aiModelVersions.length ? aiModelVersions : [aiModelVersion]).map(
+                      (version) => (
+                        <option key={version} value={version}>
+                          {version}
+                        </option>
+                      )
+                    )}
+                  </select>
+                  <p className="mt-1 text-[11px] text-slate-400">
+                    Default is the latest nightly registered version.
+                  </p>
+                </div>
+                <div className="flex flex-col justify-center">
+                  <label className="flex items-center gap-3 text-sm font-medium text-slate-100">
+                    <input
+                      type="checkbox"
+                      checked={aiUseMlBaseline}
+                      onChange={(e) => setAiUseMlBaseline(e.target.checked)}
+                      className="h-4 w-4 rounded border-slate-600 bg-slate-800 text-cyan-500 focus:ring-cyan-400"
+                    />
+                    Use ML as baseline
+                  </label>
+                  <p className="text-[11px] text-slate-400">
+                    When on, the LLM blends toward ML means; otherwise it leans on recent/season form.
+                  </p>
+                </div>
+              </div>
+
+              {aiError && (
+                <div className="rounded-xl border border-red-600/50 bg-red-900/40 px-3 py-2 text-sm text-red-100">
+                  {aiError}
+                </div>
+              )}
+
+              <div className="flex justify-end gap-3">
+                <button
+                  type="button"
+                  onClick={closeAiModal}
+                  className="rounded-full border border-slate-700 bg-slate-800/70 px-4 py-2 text-sm font-semibold text-slate-200 hover:border-slate-500"
+                  disabled={aiLoading}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={aiLoading}
+                  className={[
+                    "rounded-full px-4 py-2 text-sm font-semibold text-black transition",
+                    aiLoading
+                      ? "cursor-not-allowed bg-cyan-900/70 text-cyan-200"
+                      : "bg-cyan-400 hover:bg-cyan-300",
+                  ].join(" ")}
+                >
+                  {aiLoading ? "Generating…" : "Generate AI Predictions"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
       {/* Header */}
       <header className="border-b border-slate-700 bg-gradient-to-r from-black via-slate-900 to-black sticky top-0 z-10">
         <div className="mx-auto flex max-w-6xl items-center justify-between px-4 py-4">
@@ -820,6 +1214,8 @@ export default function NbaGamesPage() {
                                     </div>
                                   )}
 
+                                {renderAiSection(game)}
+
                                 {playerData?.mode === "stats" &&
                                   statsPlayers.length === 0 && (
                                     <div className="text-xs text-slate-400">
@@ -886,7 +1282,7 @@ export default function NbaGamesPage() {
                                             {isExpanded && (
                                               <div className="mt-2 rounded-xl border border-dashed border-cyan-400/40 bg-slate-950/40 px-3 py-2 text-[11px] text-slate-200">
                                                 <div className="mb-2 rounded-lg border border-slate-800/60 bg-slate-900/40 p-2 text-[10px] uppercase tracking-wide text-slate-400">
-                                                  {playerSummaryLoading[playerKey] ? (
+                                                {playerSummaryLoading[playerKey] ? (
                                                     <p className="text-cyan-200">
                                                       Loading averages…
                                                     </p>
@@ -923,24 +1319,32 @@ export default function NbaGamesPage() {
                                                     </div>
                                                   )}
                                                 </div>
-                                                {p.player_id ? (
-                                                  <Link
-                                                    href={`/nba-games/players/${p.player_id}`}
-                                                    className="inline-flex items-center justify-center rounded-full border border-cyan-400/60 bg-cyan-500/10 px-3 py-1 text-[11px] font-semibold text-cyan-200 hover:bg-cyan-500/20 transition"
-                                                  >
-                                                    Get Advanced AI Analysis on
-                                                    Player
-                                                  </Link>
-                                                ) : (
-                                                  <button
-                                                    type="button"
-                                                    disabled
-                                                    className="inline-flex items-center justify-center rounded-full border border-slate-700/60 bg-slate-800/60 px-3 py-1 text-[11px] font-semibold text-slate-400"
-                                                  >
-                                                    Get Advanced AI Analysis on
-                                                    Player
-                                                  </button>
-                                                )}
+                                                <div className="flex flex-wrap gap-2">
+                                                  {p.player_id ? (
+                                                    <>
+                                                      <Link
+                                                        href={`/predictions?playerId=${p.player_id}&gameId=${game.game_id}`}
+                                                        className="inline-flex items-center justify-center rounded-full border border-emerald-400/60 bg-emerald-500/10 px-3 py-1 text-[11px] font-semibold text-emerald-200 hover:bg-emerald-500/20 transition"
+                                                      >
+                                                        View Predictions
+                                                      </Link>
+                                                      <Link
+                                                        href={`/nba-games/players/${p.player_id}`}
+                                                        className="inline-flex items-center justify-center rounded-full border border-cyan-400/60 bg-cyan-500/10 px-3 py-1 text-[11px] font-semibold text-cyan-200 hover:bg-cyan-500/20 transition"
+                                                      >
+                                                        Player Deep Dive
+                                                      </Link>
+                                                    </>
+                                                  ) : (
+                                                    <button
+                                                      type="button"
+                                                      disabled
+                                                      className="inline-flex items-center justify-center rounded-full border border-slate-700/60 bg-slate-800/60 px-3 py-1 text-[11px] font-semibold text-slate-400"
+                                                    >
+                                                      Player links unavailable
+                                                    </button>
+                                                  )}
+                                                </div>
                                               </div>
                                             )}
                                           </div>
@@ -965,6 +1369,14 @@ export default function NbaGamesPage() {
                                     />
                                   </div>
                                 )}
+                                <div className="mt-4">
+                                  <Link
+                                    href={`/nba-games/${game.game_id}`}
+                                    className="inline-flex items-center justify-center rounded-full border border-emerald-500/60 bg-emerald-500/10 px-4 py-2 text-[11px] font-semibold text-emerald-200 hover:bg-emerald-500/20 transition"
+                                  >
+                                    Open Game Page
+                                  </Link>
+                                </div>
                               </div>
                             )}
                           </div>

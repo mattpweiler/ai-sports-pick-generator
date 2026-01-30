@@ -44,3 +44,5 @@ jobs:
           python3 python-scripts/get-nba-data-works.py \
             --season 2025-26 \
             --season-type "Regular Season"
+          python3 python-scripts/run_nightly_pipeline.py
+          

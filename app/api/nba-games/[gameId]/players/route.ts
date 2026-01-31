@@ -287,6 +287,44 @@ export async function GET(
       pts: row.pts,
     }));
 
+    // Backfill DNPs by merging roster players not present in the box score.
+    try {
+      const { roster } = await fetchRosterForGame(gameIdNum);
+      const existingIds = new Set(players.map((p) => p.player_id));
+
+      roster.forEach((team) => {
+        (team.players ?? []).forEach((player) => {
+          if (existingIds.has(player.player_id)) return;
+          players.push({
+            game_id: gameIdNum,
+            team_abbr: team.team_abbr ?? null,
+            player_id: player.player_id,
+            player_name: player.player_name,
+            start_pos: player.position,
+            min: "0",
+            oreb: "0",
+            dreb: "0",
+            reb: "0",
+            ast: 0,
+            stl: 0,
+            blk: "0",
+            tov: 0,
+            pf: 0,
+            pts: 0,
+          });
+          existingIds.add(player.player_id);
+        });
+      });
+
+      players.sort((a, b) => {
+        const teamA = (a.team_abbr ?? "").localeCompare(b.team_abbr ?? "");
+        if (teamA !== 0) return teamA;
+        return (a.player_name ?? "").localeCompare(b.player_name ?? "");
+      });
+    } catch (mergeErr) {
+      console.warn("Roster merge failed; continuing with box score only:", mergeErr);
+    }
+
     return NextResponse.json({ players, mode: "stats" });
   } catch (err) {
     console.error(

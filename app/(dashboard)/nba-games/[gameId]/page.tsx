@@ -102,6 +102,38 @@ function isFutureGame(game: Game) {
   return true;
 }
 
+function isPastGame(game: Game) {
+  const gameDayKey = game.game_date?.trim() ?? null;
+  if (gameDayKey && /^\d{4}-\d{2}-\d{2}$/.test(gameDayKey)) {
+    const todayKey = new Date().toISOString().split("T")[0];
+    return gameDayKey < todayKey;
+  }
+  const dt = getGameDate(game);
+  if (!dt) return false;
+  const startOfToday = new Date();
+  startOfToday.setHours(0, 0, 0, 0);
+  const gameDay = new Date(dt);
+  gameDay.setHours(0, 0, 0, 0);
+  return gameDay < startOfToday;
+}
+
+function isWithinAiWindow(game: Game) {
+  const gameDayKey = game.game_date?.trim() ?? null;
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  let gameDate: Date | null = null;
+  if (gameDayKey && /^\d{4}-\d{2}-\d{2}$/.test(gameDayKey)) {
+    gameDate = new Date(`${gameDayKey}T12:00:00Z`);
+  } else {
+    gameDate = getGameDate(game);
+  }
+  if (!gameDate || Number.isNaN(gameDate.getTime())) return false;
+  const diffDays =
+    (gameDate.setHours(0, 0, 0, 0) - today.getTime()) /
+    (1000 * 60 * 60 * 24);
+  return diffDays >= -3 && diffDays <= 3;
+}
+
 type PageProps = {
   params: { gameId: string };
 };
@@ -327,23 +359,25 @@ export default function GamePage({ params }: PageProps) {
                   {game.game_code || "Scheduled"} • {game.game_status_text}
                 </p>
               </div>
-              <div className="flex gap-3">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setAiError(null);
-                    setAiModalOpen(true);
-                  }}
-                  className="rounded-full border border-cyan-500/60 bg-cyan-500/10 px-4 py-2 text-[11px] font-semibold text-cyan-100 hover:bg-cyan-500/20 transition"
-                >
-                  Generate AI Predictions
-                </button>
-              </div>
+              {isWithinAiWindow(game) && (
+                <div className="flex gap-3">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAiError(null);
+                      setAiModalOpen(true);
+                    }}
+                    className="rounded-full border border-cyan-500/60 bg-cyan-500/10 px-4 py-2 text-[11px] font-semibold text-cyan-100 hover:bg-cyan-500/20 transition"
+                  >
+                    Generate AI Predictions
+                  </button>
+                </div>
+              )}
             </div>
           </div>
         )}
 
-        {aiResult && (
+        {game && isWithinAiWindow(game) && aiResult && (
           <div className="rounded-2xl border border-cyan-500/30 bg-slate-950/60 p-4">
             <div className="flex items-center justify-between">
               <div>
@@ -548,7 +582,7 @@ export default function GamePage({ params }: PageProps) {
         </div>
       </main>
 
-      {aiModalOpen && (
+      {game && isWithinAiWindow(game) && aiModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4 py-6">
           <div className="w-full max-w-2xl rounded-2xl border border-cyan-500/40 bg-slate-950 p-6 shadow-2xl shadow-cyan-500/20">
             <div className="flex items-start justify-between gap-3">

@@ -205,6 +205,38 @@ function isFutureGame(game: Game) {
   return true;
 }
 
+function isPastGame(game: Game) {
+  const gameDayKey = getScheduleDateKey(game);
+  if (!gameDayKey) return false;
+  const todayKey = new Date().toISOString().split("T")[0];
+  return gameDayKey < todayKey;
+}
+
+function isTodayDateKey(key: string) {
+  const todayKey = new Date().toISOString().split("T")[0];
+  return key === todayKey;
+}
+
+function isWithinAiWindow(game: Game) {
+  const gameDayKey = getScheduleDateKey(game);
+  if (!gameDayKey) return false;
+  const gameDate = new Date(`${gameDayKey}T12:00:00Z`);
+  if (Number.isNaN(gameDate.getTime())) return false;
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const diffDays = (gameDate.getTime() - today.getTime()) / (1000 * 60 * 60 * 24);
+  return diffDays >= -3 && diffDays <= 3;
+}
+
+function getMinutesValue(min: string | number | null | undefined) {
+  if (typeof min === "number") return Number.isFinite(min) ? min : 0;
+  if (typeof min === "string") {
+    const parsed = parseFloat(min);
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+  return 0;
+}
+
 
 function TeamBadge({ label }: { label: string }) {
   return (
@@ -248,139 +280,135 @@ function RosterGrid({
 
   return (
     <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-      {roster.map((team) => (
-        <div
-          key={`${team.team_id}-${team.side}`}
-          className="rounded-2xl border border-slate-800 bg-slate-950/60 p-4"
-        >
-          <div className="mb-3 flex items-center justify-between">
-            <div>
-              <p className="text-[11px] uppercase tracking-wide text-slate-500">
-                {team.side === "home" ? "Home Team" : "Away Team"}
-              </p>
-              <p className="text-sm font-semibold text-slate-50">
-                {team.team_name ?? `Team ${team.team_id}`}
-              </p>
-            </div>
-            <TeamBadge label={team.team_abbr ?? "UNK"} />
-          </div>
-          <div className="space-y-2">
-            {team.players.length === 0 && (
-              <div className="rounded-xl border border-dashed border-slate-700/70 bg-slate-900/40 px-3 py-2 text-xs text-slate-400">
-                No active players synced yet.
+      {roster.map((team) => {
+        const sortedPlayers = team.players
+          .slice()
+          .sort((a, b) => {
+            const keyA = buildPlayerKey(
+              gameId,
+              "roster",
+              a.player_id,
+              team.team_id
+            );
+            const keyB = buildPlayerKey(
+              gameId,
+              "roster",
+              b.player_id,
+              team.team_id
+            );
+            const ppgA = summaries[keyA]?.pts ?? 0;
+            const ppgB = summaries[keyB]?.pts ?? 0;
+            if (ppgA !== ppgB) return ppgB - ppgA;
+            const nameA = (a.player_name ?? "").toLowerCase();
+            const nameB = (b.player_name ?? "").toLowerCase();
+            return nameA.localeCompare(nameB);
+          });
+        return (
+          <div
+            key={`${team.team_id}-${team.side}`}
+            className="rounded-2xl border border-slate-800 bg-slate-950/60 p-4"
+          >
+            <div className="mb-3 flex items-center justify-between">
+              <div>
+                <p className="text-[11px] uppercase tracking-wide text-slate-500">
+                  {team.side === "home" ? "Home Team" : "Away Team"}
+                </p>
+                <p className="text-sm font-semibold text-slate-50">
+                  {team.team_name ?? `Team ${team.team_id}`}
+                </p>
               </div>
-            )}
-            {team.players.map((player) => {
-              const playerKey = buildPlayerKey(
-                gameId,
-                "roster",
-                player.player_id,
-                team.team_id
-              );
-              const isExpanded = expandedPlayers[playerKey] ?? false;
-              const summary = summaries[playerKey];
-              const summaryLoadingFlag = summaryLoading[playerKey];
-              return (
-                <div
-                  key={`${team.team_id}-${player.player_id}`}
-                  role="button"
-                  tabIndex={0}
-                  onClick={() => onToggle(playerKey, player.player_id)}
-                  onKeyDown={(evt) => {
-                    if (evt.key === "Enter" || evt.key === " ") {
-                      evt.preventDefault();
-                      onToggle(playerKey, player.player_id);
-                    }
-                  }}
-                  className={[
-                    "rounded-xl border px-3 py-2 text-xs text-slate-100 transition",
-                    "border-slate-800/60 bg-slate-900/60 hover:border-cyan-400/40 hover:bg-slate-900/80",
-                    "cursor-pointer",
-                  ].join(" ")}
-                  aria-expanded={isExpanded}
-                >
-                  <div className="flex items-center justify-between gap-3">
-                    <div>
-                      <p className="font-medium text-slate-100">
-                        {player.player_name ?? "Unnamed Player"}
-                      </p>
-                      <p className="text-[11px] uppercase tracking-wide text-slate-400">
-                        {player.position ?? "TBD"}
-                      </p>
-                    </div>
-                    <span className="text-[11px] font-semibold text-cyan-300">
-                      Player Overview
-                    </span>
-                  </div>
-                  {isExpanded && (
-                    <div className="mt-2 rounded-xl border border-dashed border-slate-700/70 bg-slate-950/40 px-3 py-2 text-[11px] text-slate-300">
-                      <p className="mb-2">5 Game Averages</p>
-                      <div className="mb-2 rounded-lg border border-slate-800/60 bg-slate-900/40 p-2 text-[10px] uppercase tracking-wide text-slate-400">
-                        {summaryLoadingFlag ? (
-                          <p className="text-cyan-200">
-                            Loading averages…
-                          </p>
+              <TeamBadge label={team.team_abbr ?? "UNK"} />
+            </div>
+            <div className="space-y-2">
+              {sortedPlayers.length === 0 && (
+                <div className="rounded-xl border border-dashed border-slate-700/70 bg-slate-900/40 px-3 py-2 text-xs text-slate-400">
+                  No active players synced yet.
+                </div>
+              )}
+              {sortedPlayers.map((player) => {
+                const playerKey = buildPlayerKey(
+                  gameId,
+                  "roster",
+                  player.player_id,
+                  team.team_id
+                );
+                const summary = summaries[playerKey];
+                const summaryLoadingFlag = summaryLoading[playerKey];
+                return (
+                  <div
+                    key={`${team.team_id}-${player.player_id}`}
+                    className={[
+                      "rounded-xl border px-3 py-2 text-xs text-slate-100",
+                      "border-slate-800/60 bg-slate-900/60",
+                    ].join(" ")}
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <div>
+                        <p className="font-medium text-slate-100">
+                          {player.player_name ?? "Unnamed Player"}
+                        </p>
+                        <p className="text-[11px] uppercase tracking-wide text-slate-400">
+                          {player.position ?? "TBD"}
+                        </p>
+                      </div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        {player.player_id ? (
+                          <>
+                            <Link
+                              href={`/predictions?playerId=${player.player_id}&gameId=${gameId}`}
+                              className="inline-flex items-center justify-center rounded-full border border-emerald-400/60 bg-emerald-500/10 px-3 py-1 text-[11px] font-semibold text-emerald-200 hover:bg-emerald-500/20 transition"
+                            >
+                              View Predictions
+                            </Link>
+                            <Link
+                              href={`/nba-games/players/${player.player_id}`}
+                              className="inline-flex items-center justify-center rounded-full border border-cyan-400/60 bg-cyan-500/10 px-3 py-1 text-[11px] font-semibold text-cyan-200 hover:bg-cyan-500/20 transition"
+                            >
+                              Player Deep Dive
+                            </Link>
+                          </>
                         ) : (
-                          <div className="grid grid-cols-2 gap-2">
-                            <span>
-                              Avg PTS:{" "}
-                              <span className="text-cyan-200">
-                                {summary?.pts ?? "—"}
-                              </span>
-                            </span>
-                            <span>
-                              Avg REB:{" "}
-                              <span className="text-cyan-200">
-                                {summary?.reb ?? "—"}
-                              </span>
-                            </span>
-                            <span>
-                              Avg AST:{" "}
-                              <span className="text-cyan-200">
-                                {summary?.ast ?? "—"}
-                              </span>
-                            </span>
-                            <span>
-                              Avg PRA:{" "}
-                              <span className="text-cyan-200">
-                                {summary?.pra ?? "—"}
-                              </span>
-                            </span>
-                          </div>
+                          <button
+                            type="button"
+                            disabled
+                            className="inline-flex items-center justify-center rounded-full border border-slate-700/60 bg-slate-800/60 px-3 py-1 text-[11px] font-semibold text-slate-400"
+                          >
+                            Get Advanced AI Analysis on Player
+                          </button>
                         )}
                       </div>
-                      {player.player_id ? (
-                        <div className="flex flex-wrap gap-2">
-                          <Link
-                            href={`/predictions?playerId=${player.player_id}&gameId=${gameId}`}
-                            className="inline-flex items-center justify-center rounded-full border border-emerald-400/60 bg-emerald-500/10 px-3 py-1 text-[11px] font-semibold text-emerald-200 hover:bg-emerald-500/20 transition"
-                          >
-                            View Predictions
-                          </Link>
-                          <Link
-                            href={`/nba-games/players/${player.player_id}`}
-                            className="inline-flex items-center justify-center rounded-full border border-cyan-400/60 bg-cyan-500/10 px-3 py-1 text-[11px] font-semibold text-cyan-200 hover:bg-cyan-500/20 transition"
-                          >
-                            Player Deep Dive
-                          </Link>
-                        </div>
+                    </div>
+                    <div className="mt-2 rounded-xl border border-dashed border-slate-700/70 bg-slate-950/40 px-3 py-2 text-[11px] text-slate-300">
+                      {summaryLoadingFlag ? (
+                        <p className="text-cyan-200">Loading averages…</p>
                       ) : (
-                        <button
-                          type="button"
-                          disabled
-                          className="inline-flex items-center justify-center rounded-full border border-slate-700/60 bg-slate-800/60 px-3 py-1 text-[11px] font-semibold text-slate-400"
-                        >
-                          Get Advanced AI Analysis on Player
-                        </button>
+                        <p className="text-[11px] text-slate-200">
+                          Last 5 Averages · PTS{" "}
+                          <span className="text-cyan-200">
+                            {summary?.pts ?? "—"}
+                          </span>{" "}
+                          · REB{" "}
+                          <span className="text-cyan-200">
+                            {summary?.reb ?? "—"}
+                          </span>{" "}
+                          · AST{" "}
+                          <span className="text-cyan-200">
+                            {summary?.ast ?? "—"}
+                          </span>{" "}
+                          · PRA{" "}
+                          <span className="text-cyan-200">
+                            {summary?.pra ?? "—"}
+                          </span>
+                        </p>
                       )}
                     </div>
-                  )}
-                </div>
-              );
-            })}
+                  </div>
+                );
+              })}
+            </div>
           </div>
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 }
@@ -539,6 +567,21 @@ export default function NbaGamesPage() {
     }
   }
 
+  async function prefetchRosterSummaries(gameId: number, roster: TeamRoster[]) {
+    const requests: Promise<void>[] = [];
+    roster.forEach((team) => {
+      (team.players ?? []).forEach((player) => {
+        const key = buildPlayerKey(gameId, "roster", player.player_id, team.team_id);
+        if (player.player_id && !playerSummaries[key] && !playerSummaryLoading[key]) {
+          requests.push(loadPlayerSummary(player.player_id, key));
+        }
+      });
+    });
+    if (requests.length) {
+      await Promise.all(requests);
+    }
+  }
+
   function togglePlayerExpansion(key: string, playerId?: number | null) {
     setExpandedPlayers((prev) => {
       const nextState = { ...prev, [key]: !prev[key] };
@@ -631,6 +674,9 @@ export default function NbaGamesPage() {
   }
 
   function renderAiSection(game: Game) {
+    if (!isWithinAiWindow(game)) {
+      return null;
+    }
     const aiResult = aiResults[game.game_id];
     const grouped = aiResult
       ? aiResult.players.reduce<Record<string, typeof aiResult.players>>(
@@ -649,7 +695,7 @@ export default function NbaGamesPage() {
         : null;
 
     return (
-      <div className="mt-5 rounded-2xl border border-cyan-500/30 bg-slate-950/60 p-4">
+      <div className="my-5 rounded-2xl border border-cyan-500/30 bg-slate-950/60 p-4">
         <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
           <div>
             <p className="text-xs uppercase tracking-wide text-cyan-300">
@@ -819,6 +865,11 @@ export default function NbaGamesPage() {
             ? { mode: "roster", roster: json.roster ?? [] }
             : { mode: "stats", players: json.players ?? [] },
       }));
+      if (resultMode === "roster" && (json.roster?.length ?? 0) > 0) {
+        prefetchRosterSummaries(id, json.roster ?? []).catch((err) =>
+          console.warn("Prefetch summaries failed", err)
+        );
+      }
     } catch (err) {
       console.error("Error loading players:", err);
     } finally {
@@ -1098,22 +1149,33 @@ export default function NbaGamesPage() {
               {dateSections.map(([dateKey, dateGames]) => {
                 const expanded = isDateExpanded(dateKey);
                 const showCupFinalsNote = isCupFinalDate(dateKey);
+                const isToday = activeFilter === "thisWeek" && isTodayDateKey(dateKey);
                 return (
                   <div key={dateKey} className="border-b border-slate-800/50">
                     <button
                       type="button"
                       onClick={() => toggleDateSection(dateKey)}
-                      className="flex w-full items-center justify-between px-4 py-2 text-left text-sm font-semibold text-cyan-100 bg-slate-900/60 hover:bg-slate-900/80 transition-colors cursor-pointer"
+                      className={[
+                        "flex w-full items-center justify-between px-4 py-2 text-left text-sm font-semibold transition-colors cursor-pointer border",
+                        isToday
+                          ? "text-emerald-100 bg-emerald-900/60 hover:bg-emerald-900/80 border-emerald-500/60"
+                          : "text-cyan-100 bg-slate-900/60 hover:bg-slate-900/80 border-slate-800/60",
+                      ].join(" ")}
                     >
                       <div className="flex items-center gap-3">
                         <ArrowIcon expanded={expanded} />
-                        <span className="text-xs uppercase tracking-wider">
-                          {getDateLabelFromKey(dateKey)}
+                        <span className="inline-flex items-center gap-2 text-xs uppercase tracking-wider">
+                          <span>{getDateLabelFromKey(dateKey)}</span>
                         </span>
                         <span className="rounded-full border border-cyan-500/40 bg-cyan-500/10 px-2 py-0.5 text-[11px] text-cyan-200">
                           {dateGames.length} game
                           {dateGames.length > 1 ? "s" : ""}
                         </span>
+                        {activeFilter === "thisWeek" && isTodayDateKey(dateKey) && (
+                          <span className="rounded-full border border-emerald-400/60 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-semibold tracking-wide text-emerald-200">
+                            Today
+                          </span>
+                        )}
                       </div>
                       <span className="text-xs text-cyan-300">
                         {expanded ? "Hide" : "Show"}
@@ -1225,138 +1287,342 @@ export default function NbaGamesPage() {
 
                                 {playerData?.mode === "stats" &&
                                   statsPlayers.length > 0 && (
-                                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                                      {statsPlayers.map((p) => {
-                                        const playerKey = buildPlayerKey(
-                                          game.game_id,
-                                          "stats",
-                                          p.player_id,
-                                          p.team_abbr ?? "UNK"
-                                        );
-                                        const isExpanded =
-                                          expandedPlayers[playerKey] ?? false;
-                                        return (
-                                          <div
-                                            key={p.player_id}
-                                            className="rounded-xl border border-cyan-500/30 bg-cyan-500/5 p-3"
-                                          >
-                                            <div className="flex justify-between items-center mb-1">
-                                              <span className="font-medium text-cyan-200">
-                                                {p.player_name}
-                                              </span>
-                                              <TeamBadge
-                                                label={p.team_abbr ?? "UNK"}
-                                              />
-                                            </div>
-                                            <div className="text-xs text-slate-300 mb-1">
-                                              {p.start_pos || "Bench"} •{" "}
-                                              {p.min ?? "0"} MIN
-                                            </div>
-                                            <div className="text-xs text-slate-400">
-                                              PTS:{" "}
-                                              <span className="text-cyan-200">
-                                                {p.pts ?? 0}
-                                              </span>{" "}
-                                              · REB:{" "}
-                                              <span className="text-cyan-200">
-                                                {p.reb ?? "0"}
-                                              </span>{" "}
-                                              · AST:{" "}
-                                              <span className="text-cyan-200">
-                                                {p.ast ?? 0}
-                                              </span>
-                                            </div>
-                                            <button
-                                              type="button"
-                                              className="mt-3 text-[11px] font-semibold text-cyan-200 underline-offset-2 hover:underline"
-                                              onClick={() =>
-                                                togglePlayerExpansion(
-                                                  playerKey,
-                                                  p.player_id
-                                                )
-                                              }
-                                              aria-expanded={isExpanded}
+                                    <>
+                                      {isPastGame(game) ? (
+                                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                          {Object.entries(
+                                            statsPlayers.reduce<Record<string, Player[]>>(
+                                              (acc, player) => {
+                                                const key = player.team_abbr ?? "UNK";
+                                                if (!acc[key]) acc[key] = [];
+                                                acc[key].push(player);
+                                                return acc;
+                                              },
+                                              {}
+                                            )
+                                          ).map(([teamAbbr, teamPlayers]) => {
+                                            const sortedTeamPlayers = teamPlayers
+                                              .slice()
+                                              .sort(
+                                                (a, b) =>
+                                                  (b.pts ?? 0) - (a.pts ?? 0)
+                                              );
+                                            const playedPlayers = sortedTeamPlayers.filter(
+                                              (p) => getMinutesValue(p.min) > 0
+                                            );
+                                            const didNotPlay = sortedTeamPlayers.filter(
+                                              (p) => getMinutesValue(p.min) <= 0
+                                            );
+                                            return (
+                                            <div
+                                              key={teamAbbr}
+                                              className="rounded-2xl border border-slate-800 bg-slate-950/70 p-3"
                                             >
-                                              Player Overview
-                                            </button>
-                                            {isExpanded && (
-                                              <div className="mt-2 rounded-xl border border-dashed border-cyan-400/40 bg-slate-950/40 px-3 py-2 text-[11px] text-slate-200">
-                                                <div className="mb-2 rounded-lg border border-slate-800/60 bg-slate-900/40 p-2 text-[10px] uppercase tracking-wide text-slate-400">
-                                                {playerSummaryLoading[playerKey] ? (
-                                                    <p className="text-cyan-200">
-                                                      Loading averages…
-                                                    </p>
-                                                  ) : (
-                                                    <div className="grid grid-cols-2 gap-2">
-                                                      <span>
-                                                        Avg PTS:{" "}
-                                                        <span className="text-cyan-200">
-                                                          {playerSummaries[playerKey]?.pts ??
-                                                            "—"}
-                                                        </span>
-                                                      </span>
-                                                      <span>
-                                                        Avg REB:{" "}
-                                                        <span className="text-cyan-200">
-                                                          {playerSummaries[playerKey]?.reb ??
-                                                            "—"}
-                                                        </span>
-                                                      </span>
-                                                      <span>
-                                                        Avg AST:{" "}
-                                                        <span className="text-cyan-200">
-                                                          {playerSummaries[playerKey]?.ast ??
-                                                            "—"}
-                                                        </span>
-                                                      </span>
-                                                      <span>
-                                                        Avg PRA:{" "}
-                                                        <span className="text-cyan-200">
-                                                          {playerSummaries[playerKey]?.pra ??
-                                                            "—"}
-                                                        </span>
-                                                      </span>
-                                                    </div>
-                                                  )}
-                                                </div>
-                                                <div className="flex flex-wrap gap-2">
-                                                  {p.player_id ? (
-                                                    <>
-                                                      <Link
-                                                        href={`/predictions?playerId=${p.player_id}&gameId=${game.game_id}`}
-                                                        className="inline-flex items-center justify-center rounded-full border border-emerald-400/60 bg-emerald-500/10 px-3 py-1 text-[11px] font-semibold text-emerald-200 hover:bg-emerald-500/20 transition"
-                                                      >
-                                                        View Predictions
-                                                      </Link>
-                                                      <Link
-                                                        href={`/nba-games/players/${p.player_id}`}
-                                                        className="inline-flex items-center justify-center rounded-full border border-cyan-400/60 bg-cyan-500/10 px-3 py-1 text-[11px] font-semibold text-cyan-200 hover:bg-cyan-500/20 transition"
-                                                      >
-                                                        Player Deep Dive
-                                                      </Link>
-                                                    </>
-                                                  ) : (
-                                                    <button
-                                                      type="button"
-                                                      disabled
-                                                      className="inline-flex items-center justify-center rounded-full border border-slate-700/60 bg-slate-800/60 px-3 py-1 text-[11px] font-semibold text-slate-400"
-                                                    >
-                                                      Player links unavailable
-                                                    </button>
-                                                  )}
-                                                </div>
+                                              <div className="mb-2 flex items-center justify-between">
+                                                <p className="text-sm font-semibold text-slate-100">
+                                                  {teamAbbr}
+                                                </p>
+                                                <span className="text-[11px] text-slate-400">
+                                                  {teamPlayers.length} player
+                                                  {teamPlayers.length > 1 ? "s" : ""}
+                                                </span>
                                               </div>
-                                            )}
-                                          </div>
-                                        );
-                                      })}
-                                    </div>
+                                              <div className="space-y-3">
+                                                {playedPlayers.map((p) => {
+                                                  const playerKey = buildPlayerKey(
+                                                    game.game_id,
+                                                    "stats",
+                                                    p.player_id,
+                                                    p.team_abbr ?? "UNK"
+                                                  );
+                                                  const isExpanded =
+                                                    expandedPlayers[playerKey] ?? false;
+                                                  return (
+                                                    <div
+                                                      key={p.player_id}
+                                                      className="rounded-xl border border-cyan-500/30 bg-cyan-500/5 p-3"
+                                                    >
+                                                      <div className="flex justify-between items-center mb-1">
+                                                        <span className="font-medium text-cyan-200">
+                                                          {p.player_name}
+                                                        </span>
+                                                        <TeamBadge
+                                                          label={p.team_abbr ?? "UNK"}
+                                                        />
+                                                      </div>
+                                                      <div className="text-xs text-slate-300 mb-1">
+                                                        {p.start_pos || "Bench"} •{" "}
+                                                        {p.min ?? "0"} MIN
+                                                      </div>
+                                                      <div className="text-xs text-slate-400">
+                                                        PTS:{" "}
+                                                        <span className="text-cyan-200">
+                                                          {p.pts ?? 0}
+                                                        </span>{" "}
+                                                        · REB:{" "}
+                                                        <span className="text-cyan-200">
+                                                          {p.reb ?? "0"}
+                                                        </span>{" "}
+                                                        · AST:{" "}
+                                                        <span className="text-cyan-200">
+                                                          {p.ast ?? 0}
+                                                        </span>
+                                                      </div>
+                                                      <button
+                                                        type="button"
+                                                        className="mt-3 text-[11px] font-semibold text-cyan-200 underline-offset-2 hover:underline"
+                                                        onClick={() =>
+                                                          togglePlayerExpansion(
+                                                            playerKey,
+                                                            p.player_id
+                                                          )
+                                                        }
+                                                        aria-expanded={isExpanded}
+                                                      >
+                                                        Player Averages
+                                                      </button>
+                                                      {isExpanded && (
+                                                        <div className="mt-2 rounded-xl border border-dashed border-cyan-400/40 bg-slate-950/40 px-3 py-2 text-[11px] text-slate-200">
+                                                          <div className="mb-2 rounded-lg border border-slate-800/60 bg-slate-900/40 p-2 text-[10px] uppercase tracking-wide text-slate-400">
+                                                            {playerSummaryLoading[playerKey] ? (
+                                                              <p className="text-cyan-200">
+                                                                Loading averages…
+                                                              </p>
+                                                            ) : (
+                                                              <div className="grid grid-cols-2 gap-2">
+                                                                <span>
+                                                                  Avg PTS:{" "}
+                                                                  <span className="text-cyan-200">
+                                                                    {playerSummaries[playerKey]?.pts ??
+                                                                      "—"}
+                                                                  </span>
+                                                                </span>
+                                                                <span>
+                                                                  Avg REB:{" "}
+                                                                  <span className="text-cyan-200">
+                                                                    {playerSummaries[playerKey]?.reb ??
+                                                                      "—"}
+                                                                  </span>
+                                                                </span>
+                                                                <span>
+                                                                  Avg AST:{" "}
+                                                                  <span className="text-cyan-200">
+                                                                    {playerSummaries[playerKey]?.ast ??
+                                                                      "—"}
+                                                                  </span>
+                                                                </span>
+                                                                <span>
+                                                                  Avg PRA:{" "}
+                                                                  <span className="text-cyan-200">
+                                                                    {playerSummaries[playerKey]?.pra ??
+                                                                      "—"}
+                                                                  </span>
+                                                                </span>
+                                                              </div>
+                                                            )}
+                                                          </div>
+                                                          <div className="flex flex-wrap gap-2">
+                                                            {p.player_id ? (
+                                                              <>
+                                                                {!isPastGame(game) && (
+                                                                  <Link
+                                                                    href={`/predictions?playerId=${p.player_id}&gameId=${game.game_id}`}
+                                                                    className="inline-flex items-center justify-center rounded-full border border-emerald-400/60 bg-emerald-500/10 px-3 py-1 text-[11px] font-semibold text-emerald-200 hover:bg-emerald-500/20 transition"
+                                                                  >
+                                                                    View Predictions
+                                                                  </Link>
+                                                                )}
+                                                                <Link
+                                                                  href={`/nba-games/players/${p.player_id}`}
+                                                                  className="inline-flex items-center justify-center rounded-full border border-cyan-400/60 bg-cyan-500/10 px-3 py-1 text-[11px] font-semibold text-cyan-200 hover:bg-cyan-500/20 transition"
+                                                                >
+                                                                  Player Deep Dive
+                                                                </Link>
+                                                              </>
+                                                            ) : (
+                                                              <button
+                                                                type="button"
+                                                                disabled
+                                                                className="inline-flex items-center justify-center rounded-full border border-slate-700/60 bg-slate-800/60 px-3 py-1 text-[11px] font-semibold text-slate-400"
+                                                              >
+                                                                Player links unavailable
+                                                              </button>
+                                                            )}
+                                                          </div>
+                                                        </div>
+                                                      )}
+                                                    </div>
+                                                  );
+                                                })}
+                                              </div>
+                                              {didNotPlay.length > 0 && (
+                                                <div className="mt-4 rounded-xl border border-slate-800 bg-slate-900/50 p-3">
+                                                  <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-300">
+                                                    Did Not Play
+                                                  </p>
+                                                  <div className="mt-2 space-y-2">
+                                                    {didNotPlay.map((p) => (
+                                                      <div
+                                                        key={p.player_id}
+                                                        className="rounded-lg border border-slate-800 bg-slate-950/60 px-3 py-2 text-xs text-slate-200 flex items-center justify-between"
+                                                      >
+                                                        <div>
+                                                          <p className="font-semibold text-slate-100">
+                                                            {p.player_name ?? `Player ${p.player_id}`}
+                                                          </p>
+                                                          <p className="text-[11px] uppercase tracking-wide text-slate-400">
+                                                            {p.start_pos || "Bench"} • {p.team_abbr ?? "UNK"}
+                                                          </p>
+                                                        </div>
+                                                        <span className="text-[11px] text-slate-400">
+                                                          0 MIN
+                                                        </span>
+                                                      </div>
+                                                    ))}
+                                                  </div>
+                                                </div>
+                                              )}
+                                            </div>
+                                            );
+                                          })}
+                                        </div>
+                                      ) : (
+                                        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                                          {statsPlayers.map((p) => {
+                                            const playerKey = buildPlayerKey(
+                                              game.game_id,
+                                              "stats",
+                                              p.player_id,
+                                              p.team_abbr ?? "UNK"
+                                            );
+                                            const isExpanded =
+                                              expandedPlayers[playerKey] ?? false;
+                                            return (
+                                              <div
+                                                key={p.player_id}
+                                                className="rounded-xl border border-cyan-500/30 bg-cyan-500/5 p-3"
+                                              >
+                                                <div className="flex justify-between items-center mb-1">
+                                                  <span className="font-medium text-cyan-200">
+                                                    {p.player_name}
+                                                  </span>
+                                                  <TeamBadge
+                                                    label={p.team_abbr ?? "UNK"}
+                                                  />
+                                                </div>
+                                                <div className="text-xs text-slate-300 mb-1">
+                                                  {p.start_pos || "Bench"} •{" "}
+                                                  {p.min ?? "0"} MIN
+                                                </div>
+                                                <div className="text-xs text-slate-400">
+                                                  PTS:{" "}
+                                                  <span className="text-cyan-200">
+                                                    {p.pts ?? 0}
+                                                  </span>{" "}
+                                                  · REB:{" "}
+                                                  <span className="text-cyan-200">
+                                                    {p.reb ?? "0"}
+                                                  </span>{" "}
+                                                  · AST:{" "}
+                                                  <span className="text-cyan-200">
+                                                    {p.ast ?? 0}
+                                                  </span>
+                                                </div>
+                                                <button
+                                                  type="button"
+                                                  className="mt-3 text-[11px] font-semibold text-cyan-200 underline-offset-2 hover:underline"
+                                                  onClick={() =>
+                                                    togglePlayerExpansion(
+                                                      playerKey,
+                                                      p.player_id
+                                                    )
+                                                  }
+                                                  aria-expanded={isExpanded}
+                                                >
+                                                  Player Averages
+                                                </button>
+                                                {isExpanded && (
+                                                  <div className="mt-2 rounded-xl border border-dashed border-cyan-400/40 bg-slate-950/40 px-3 py-2 text-[11px] text-slate-200">
+                                                    <div className="mb-2 rounded-lg border border-slate-800/60 bg-slate-900/40 p-2 text-[10px] uppercase tracking-wide text-slate-400">
+                                                      {playerSummaryLoading[playerKey] ? (
+                                                        <p className="text-cyan-200">
+                                                          Loading averages…
+                                                        </p>
+                                                      ) : (
+                                                        <div className="grid grid-cols-2 gap-2">
+                                                          <span>
+                                                            Avg PTS:{" "}
+                                                            <span className="text-cyan-200">
+                                                              {playerSummaries[playerKey]?.pts ??
+                                                                "—"}
+                                                            </span>
+                                                          </span>
+                                                          <span>
+                                                            Avg REB:{" "}
+                                                            <span className="text-cyan-200">
+                                                              {playerSummaries[playerKey]?.reb ??
+                                                                "—"}
+                                                            </span>
+                                                          </span>
+                                                          <span>
+                                                            Avg AST:{" "}
+                                                            <span className="text-cyan-200">
+                                                              {playerSummaries[playerKey]?.ast ??
+                                                                "—"}
+                                                            </span>
+                                                          </span>
+                                                          <span>
+                                                            Avg PRA:{" "}
+                                                            <span className="text-cyan-200">
+                                                              {playerSummaries[playerKey]?.pra ??
+                                                                "—"}
+                                                            </span>
+                                                          </span>
+                                                        </div>
+                                                      )}
+                                                    </div>
+                                                    <div className="flex flex-wrap gap-2">
+                                                      {p.player_id ? (
+                                                        <>
+                                                          {!isPastGame(game) && (
+                                                            <Link
+                                                              href={`/predictions?playerId=${p.player_id}&gameId=${game.game_id}`}
+                                                              className="inline-flex items-center justify-center rounded-full border border-emerald-400/60 bg-emerald-500/10 px-3 py-1 text-[11px] font-semibold text-emerald-200 hover:bg-emerald-500/20 transition"
+                                                            >
+                                                              View Predictions
+                                                            </Link>
+                                                          )}
+                                                          <Link
+                                                            href={`/nba-games/players/${p.player_id}`}
+                                                            className="inline-flex items-center justify-center rounded-full border border-cyan-400/60 bg-cyan-500/10 px-3 py-1 text-[11px] font-semibold text-cyan-200 hover:bg-cyan-500/20 transition"
+                                                          >
+                                                            Player Deep Dive
+                                                          </Link>
+                                                        </>
+                                                      ) : (
+                                                        <button
+                                                          type="button"
+                                                          disabled
+                                                          className="inline-flex items-center justify-center rounded-full border border-slate-700/60 bg-slate-800/60 px-3 py-1 text-[11px] font-semibold text-slate-400"
+                                                        >
+                                                          Player links unavailable
+                                                        </button>
+                                                      )}
+                                                    </div>
+                                                  </div>
+                                                )}
+                                              </div>
+                                            );
+                                          })}
+                                        </div>
+                                      )}
+                                    </>
                                   )}
 
                                 {playerData?.mode === "roster" && (
                                   <div className="space-y-3">
                                     <p className="text-[11px] font-semibold uppercase tracking-wide text-cyan-200">
-                                      Projected Rosters
+                                      Projected Rosters Preview
                                     </p>
                                     <RosterGrid
                                       roster={rosterTeams}
@@ -1369,14 +1635,16 @@ export default function NbaGamesPage() {
                                     />
                                   </div>
                                 )}
-                                <div className="mt-4">
-                                  <Link
-                                    href={`/nba-games/${game.game_id}`}
-                                    className="inline-flex items-center justify-center rounded-full border border-emerald-500/60 bg-emerald-500/10 px-4 py-2 text-[11px] font-semibold text-emerald-200 hover:bg-emerald-500/20 transition"
-                                  >
-                                    Open Game Page
-                                  </Link>
-                                </div>
+                                {!isPastGame(game) && (
+                                  <div className="mt-4">
+                                    <Link
+                                      href={`/nba-games/${game.game_id}`}
+                                      className="inline-flex items-center justify-center rounded-full border border-emerald-500/60 bg-emerald-500/10 px-4 py-2 text-[11px] font-semibold text-emerald-200 hover:bg-emerald-500/20 transition"
+                                    >
+                                      Open Game Page
+                                    </Link>
+                                  </div>
+                                )}
                               </div>
                             )}
                           </div>

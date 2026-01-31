@@ -408,7 +408,7 @@ export default async function PlayerAnalysisPage({
 
         <section className="rounded-2xl border border-cyan-500/30 bg-slate-950/70 p-6 shadow-2xl shadow-black/40">
           <p className="text-xs uppercase tracking-wide text-cyan-300 mb-2">
-            Player Overview
+            Player Averages
           </p>
           <h1 className="text-3xl font-bold text-slate-50">
             {displayName}

@@ -12,6 +12,8 @@ import { DEFAULT_MODEL_VERSION } from "@/lib/predictions";
 import type { AiGameProjectionsResponse } from "@/lib/aiPredictions";
 import { ExplanationCell } from "../../../components/ExplanationCell";
 
+type AiPlayers = AiGameProjectionsResponse["players"];
+
 type Game = {
   game_id: number;
   game_date: string | null;
@@ -441,12 +443,13 @@ function getPlayerNameFromRoster(
   }, [aiResult]);
 
   const aiTeamsSplit = useMemo(() => {
-    if (!aiResult) return { home: [], away: [], others: [] as typeof aiResult.players };
+    const empty: AiPlayers = [];
+    if (!aiResult) return { home: empty, away: empty, others: empty };
     const homeAbbr = (getTeamAbbr(game?.home_team_id) ?? "HOME").toUpperCase();
     const awayAbbr = (getTeamAbbr(game?.away_team_id) ?? "AWAY").toUpperCase();
-    const home: typeof aiResult.players = [];
-    const away: typeof aiResult.players = [];
-    const others: typeof aiResult.players = [];
+    const home: AiPlayers = [];
+    const away: AiPlayers = [];
+    const others: AiPlayers = [];
     aiResult.players.forEach((p) => {
       const abbr = (p.team_abbr ?? "").toUpperCase();
       if (abbr === homeAbbr) home.push(p);

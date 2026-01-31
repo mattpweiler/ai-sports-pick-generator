@@ -38,6 +38,7 @@ type RosterGridProps = {
   ) => string;
   summaries: Record<string, PlayerSummary>;
   summaryLoading: Record<string, boolean>;
+  injuries: { player_id: number | null; player_name: string | null; team_abbr: string | null }[];
 };
 
 export function TeamBadge({ label }: { label: string }) {
@@ -56,6 +57,7 @@ export function RosterGrid({
   buildPlayerKey,
   summaries,
   summaryLoading,
+  injuries,
 }: RosterGridProps) {
   if (!roster.length) {
     return (
@@ -64,6 +66,16 @@ export function RosterGrid({
       </div>
     );
   }
+
+  const injuryIds = new Set<number>();
+  const injuryNameKeys = new Set<string>();
+  injuries.forEach((p) => {
+    if (typeof p.player_id === "number" && Number.isFinite(p.player_id)) {
+      injuryIds.add(p.player_id);
+    }
+    const key = `${(p.player_name ?? "").toLowerCase()}-${(p.team_abbr ?? "").toLowerCase()}`;
+    if (key.trim() !== "-") injuryNameKeys.add(key);
+  });
 
   return (
     <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
@@ -121,6 +133,9 @@ export function RosterGrid({
                 );
                 const summary = summaries[playerKey];
                 const summaryLoadingFlag = summaryLoading[playerKey];
+                const injuryKey = `${(player.player_name ?? "").toLowerCase()}-${(team.team_abbr ?? "").toLowerCase()}`;
+                const isInjured =
+                  injuryIds.has(player.player_id) || injuryNameKeys.has(injuryKey);
                 return (
                   <div
                     key={`${team.team_id}-${player.player_id}`}
@@ -142,17 +157,16 @@ export function RosterGrid({
                         {player.player_id ? (
                           <>
                             <Link
-                              href={`/predictions?playerId=${player.player_id}&gameId=${gameId}`}
-                              className="inline-flex items-center justify-center rounded-full border border-emerald-400/60 bg-emerald-500/10 px-3 py-1 text-[11px] font-semibold text-emerald-200 hover:bg-emerald-500/20 transition"
-                            >
-                              View Predictions
-                            </Link>
-                            <Link
                               href={`/nba-games/players/${player.player_id}`}
                               className="inline-flex items-center justify-center rounded-full border border-cyan-400/60 bg-cyan-500/10 px-3 py-1 text-[11px] font-semibold text-cyan-200 hover:bg-cyan-500/20 transition"
                             >
                               Player Deep Dive
                             </Link>
+                            {isInjured && (
+                              <span className="inline-flex items-center justify-center rounded-full border border-amber-400/60 bg-amber-500/10 px-3 py-1 text-[11px] font-semibold text-amber-200">
+                                Potential Injury
+                              </span>
+                            )}
                           </>
                         ) : (
                           <button

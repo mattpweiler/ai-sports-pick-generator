@@ -45,6 +45,15 @@ type PlayersApiResponse = {
   error?: string;
 };
 
+type PriorInjury = {
+  player_id: number | null;
+  player_name: string | null;
+  team_abbr: string | null;
+  game_date: string | null;
+  reason: string;
+  matchup?: string | null;
+};
+
 type PageProps = {
   params: Promise<{ gameId: string }>;
 };
@@ -90,6 +99,42 @@ function buildPlayerKey(
   return `${gameId}:${mode}:${playerPart}:${teamPart}`;
 }
 
+function getScheduleDateKey(game: Game): string | null {
+  const rawDate = game.game_date?.trim();
+  if (rawDate) {
+    if (/^\d{4}-\d{2}-\d{2}$/.test(rawDate)) {
+      const dt = new Date(`${rawDate}T12:00:00Z`);
+      if (!Number.isNaN(dt.getTime())) {
+        return dt.toISOString().split("T")[0];
+      }
+    } else {
+      const dt = new Date(rawDate);
+      if (!Number.isNaN(dt.getTime())) {
+        return dt.toISOString().split("T")[0];
+      }
+    }
+  }
+  if (game.game_datetime_est) {
+    const dt = new Date(game.game_datetime_est);
+    if (!Number.isNaN(dt.getTime())) return dt.toISOString().split("T")[0];
+  }
+  return null;
+}
+
+function isFutureGame(game: Game) {
+  const statusId = game.game_status_id;
+  const statusText = (game.game_status_text ?? "").toLowerCase();
+
+  if (statusId === 2 || statusText.includes("live")) return false;
+  if (statusId === 3 || statusText.includes("final")) return false;
+
+  const gameDayKey = getScheduleDateKey(game);
+  if (!gameDayKey) return false;
+  const todayKey = new Date().toISOString().split("T")[0];
+  if (gameDayKey < todayKey) return false;
+  return true;
+}
+
 export default function GameSummaryPage({ params }: PageProps) {
   const resolvedParams = use(params);
   const numericGameId = useMemo(
@@ -115,20 +160,60 @@ export default function GameSummaryPage({ params }: PageProps) {
   const [playerSummaryLoading, setPlayerSummaryLoading] = useState<
     Record<string, boolean>
   >({});
+  const [priorDnpInjuries, setPriorDnpInjuries] = useState<PriorInjury[]>([]);
+  const [loadingInjuries, setLoadingInjuries] = useState(false);
+
   const notableInjuries = useMemo(() => {
-    const items: { player_name: string; team_abbr: string | null }[] = [];
+    const items: { player_name: string; team_abbr: string | null; note?: string }[] = [];
     roster.forEach((team) => {
       team.players.forEach((player) => {
         if (player.active_status === 0) {
           items.push({
             player_name: player.player_name ?? `Player ${player.player_id}`,
             team_abbr: team.team_abbr ?? null,
+            note: "Marked inactive on roster",
           });
         }
       });
     });
-    return items;
-  }, [roster]);
+    const dnpItems = priorDnpInjuries.map((p) => ({
+      player_name: p.player_name ?? `Player ${p.player_id ?? "Unknown"}`,
+      team_abbr: p.team_abbr ?? null,
+      note: `${p.reason || "Did not play last game"}${
+        p.game_date ? ` · ${p.game_date}` : ""
+      }`,
+    }));
+
+    const deduped: Record<
+      string,
+      { player_name: string; team_abbr: string | null; note?: string }
+    > = {};
+    [...items, ...dnpItems].forEach((p) => {
+      const key = `${p.player_name}-${p.team_abbr ?? "UNK"}`.toLowerCase();
+      if (!deduped[key]) deduped[key] = p;
+    });
+    return Object.values(deduped);
+  }, [roster, priorDnpInjuries]);
+
+  const injuriesByTeam = useMemo(() => {
+    const homeAbbr = (getTeamAbbr(game?.home_team_id) ?? "HOME").toUpperCase();
+    const awayAbbr = (getTeamAbbr(game?.away_team_id) ?? "AWAY").toUpperCase();
+    const buckets: Record<string, typeof notableInjuries> = {
+      [homeAbbr]: [],
+      [awayAbbr]: [],
+    };
+    notableInjuries.forEach((p) => {
+      const abbr = (p.team_abbr ?? "").toUpperCase();
+      if (abbr === homeAbbr) buckets[homeAbbr].push(p);
+      else if (abbr === awayAbbr) buckets[awayAbbr].push(p);
+      else {
+        // If team unknown, append to both for visibility.
+        buckets[homeAbbr].push(p);
+        buckets[awayAbbr].push(p);
+      }
+    });
+    return { homeAbbr, awayAbbr, buckets };
+  }, [game, notableInjuries, teams]);
 
   useEffect(() => {
     let cancelled = false;
@@ -224,6 +309,34 @@ export default function GameSummaryPage({ params }: PageProps) {
     };
   }, [game]);
 
+  useEffect(() => {
+    let cancelled = false;
+    async function loadPriorInjuries() {
+      if (!game || !isFutureGame(game)) {
+        setPriorDnpInjuries([]);
+        return;
+      }
+      setLoadingInjuries(true);
+      try {
+        const res = await fetch(`/api/nba-games/${game.game_id}/injuries`);
+        const json = await res.json();
+        if (!cancelled && res.ok) {
+          setPriorDnpInjuries(json.injuries ?? []);
+        }
+      } catch (err) {
+        if (!cancelled) {
+          console.warn("Failed to load prior injuries", err);
+        }
+      } finally {
+        if (!cancelled) setLoadingInjuries(false);
+      }
+    }
+    loadPriorInjuries();
+    return () => {
+      cancelled = true;
+    };
+  }, [game]);
+
   async function loadPlayerSummary(playerId: number, key: string) {
     if (!playerId || playerSummaries[key]) return;
     setPlayerSummaryLoading((prev) => ({ ...prev, [key]: true }));
@@ -273,11 +386,17 @@ export default function GameSummaryPage({ params }: PageProps) {
     });
   }
 
-  function getTeamName(teamId: number | null | undefined) {
-    if (!teamId) return "TBD";
-    const team = teams[teamId];
-    return team ? team.abbreviation : String(teamId);
-  }
+function getTeamName(teamId: number | null | undefined) {
+  if (!teamId) return "TBD";
+  const team = teams[teamId];
+  return team ? team.abbreviation : String(teamId);
+}
+
+function getTeamAbbr(teamId: number | null | undefined) {
+  if (!teamId) return null;
+  const team = teams[teamId];
+  return team ? team.abbreviation : null;
+}
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-black via-slate-900 to-slate-950 text-slate-50">
@@ -285,7 +404,7 @@ export default function GameSummaryPage({ params }: PageProps) {
         <div className="mx-auto flex max-w-5xl items-center justify-between px-4 py-4">
           <div>
             <p className="text-xs uppercase tracking-wide text-cyan-300">
-              Game Summary / Predictions
+              Game Summary
             </p>
             <h1 className="text-xl font-bold text-slate-50">
               Game #{resolvedParams?.gameId ?? "—"}
@@ -361,6 +480,7 @@ export default function GameSummaryPage({ params }: PageProps) {
                 buildPlayerKey={buildPlayerKey}
                 summaries={playerSummaries}
                 summaryLoading={playerSummaryLoading}
+                injuries={priorDnpInjuries}
               />
             </div>
           )}
@@ -370,32 +490,73 @@ export default function GameSummaryPage({ params }: PageProps) {
           <div className="flex items-center justify-between">
             <div>
               <p className="text-xs uppercase tracking-wide text-amber-300">
-                Notable Injuries
+                Potential Injuries
               </p>
               <p className="text-sm text-slate-300">
-                Players marked inactive on the latest roster sync.
+                Players marked inactive or who missed the last game.
               </p>
             </div>
           </div>
           <div className="mt-3 space-y-2">
+            {loadingInjuries && (
+              <p className="text-xs text-amber-200">Checking prior games…</p>
+            )}
             {notableInjuries.length === 0 && (
               <p className="text-xs text-slate-400">
                 No inactive players reported for this matchup.
               </p>
             )}
-            {notableInjuries.map((player, idx) => (
-              <div
-                key={`${player.player_name}-${player.team_abbr}-${idx}`}
-                className="flex items-center justify-between rounded-xl border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs text-amber-100"
-              >
-                <span className="font-semibold text-amber-100">
-                  {player.player_name}
-                </span>
-                <span className="rounded-full border border-amber-400/60 bg-amber-500/10 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-amber-200">
-                  {player.team_abbr ?? "UNK"}
-                </span>
+            {notableInjuries.length > 0 && (
+              <div className="grid gap-3 sm:grid-cols-2">
+                {([injuriesByTeam.homeAbbr, injuriesByTeam.awayAbbr] as string[]).map(
+                  (abbr) => (
+                    <div
+                      key={`injuries-${abbr}`}
+                      className="rounded-xl border border-amber-500/20 bg-amber-500/5 p-3"
+                    >
+                      <div className="mb-2 flex items-center justify-between text-[11px] uppercase tracking-wide text-amber-200">
+                        <span className="font-semibold">
+                          {abbr === injuriesByTeam.homeAbbr
+                            ? `Home (${abbr})`
+                            : `Away (${abbr})`}
+                        </span>
+                        <span className="rounded-full border border-amber-400/40 bg-amber-500/10 px-2 py-0.5 text-[10px] text-amber-200">
+                          {injuriesByTeam.buckets[abbr]?.length ?? 0} player
+                          {injuriesByTeam.buckets[abbr]?.length === 1 ? "" : "s"}
+                        </span>
+                      </div>
+                      <div className="space-y-2">
+                        {(injuriesByTeam.buckets[abbr] ?? []).length === 0 && (
+                          <p className="text-[11px] text-slate-400">
+                            None reported.
+                          </p>
+                        )}
+                        {(injuriesByTeam.buckets[abbr] ?? []).map((player, idx) => (
+                          <div
+                            key={`${abbr}-${player.player_name}-${idx}`}
+                            className="flex items-center justify-between rounded-lg border border-amber-500/20 bg-amber-500/5 px-3 py-2 text-xs text-amber-100"
+                          >
+                            <div className="flex flex-col">
+                              <span className="font-semibold text-amber-100">
+                                {player.player_name}
+                              </span>
+                              {player.note && (
+                                <span className="text-[11px] text-amber-200/90">
+                                  {player.note}
+                                </span>
+                              )}
+                            </div>
+                            <span className="rounded-full border border-amber-400/60 bg-amber-500/10 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-amber-200">
+                              {player.team_abbr ?? abbr ?? "UNK"}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )
+                )}
               </div>
-            ))}
+            )}
           </div>
         </div>
       </main>

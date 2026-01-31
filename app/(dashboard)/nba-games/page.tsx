@@ -1469,6 +1469,7 @@ export default function NbaGamesPage() {
                                       buildPlayerKey={buildPlayerKey}
                                       summaries={playerSummaries}
                                       summaryLoading={playerSummaryLoading}
+                                      injuries={[]}
                                     />
                                   </div>
                                 )}

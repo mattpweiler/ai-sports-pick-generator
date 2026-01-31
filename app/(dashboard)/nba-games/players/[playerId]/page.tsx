@@ -45,6 +45,16 @@ type GameStat = {
   blk: number | null;
   tov: number | null;
   pra: number | null;
+  minutes?: string | null;
+  matchup?: string | null;
+  team_abbr?: string | null;
+  opponent?: string | null;
+};
+
+type MissedGame = {
+  game_date: string | null;
+  reason: string;
+  minutes?: string | null;
   matchup?: string | null;
   team_abbr?: string | null;
   opponent?: string | null;
@@ -57,15 +67,60 @@ type PlayerAvailability = {
   effective_from: string;
 };
 
-const EXCLUDED_COMMENTS = new Set([
-  "DNP - Coach's Decision",
-  "DND - Injury/Illness",
-  "NWT - Not With Team",
-  "NWT - Injury/Illness",
-]);
+const EXCLUDED_COMMENTS = new Set(
+  [
+    "DNP - Coach's Decision",
+    "DND - Injury/Illness",
+    "NWT - Not With Team",
+    "NWT - Injury/Illness",
+  ].map((value) => value.toUpperCase())
+);
+
+function normalizeComment(comment: unknown): string | null {
+  if (typeof comment !== "string") return null;
+  const trimmed = comment.trim();
+  return trimmed || null;
+}
 
 function shouldExcludeByComment(comment: unknown) {
-  return typeof comment === "string" && EXCLUDED_COMMENTS.has(comment.trim());
+  const normalized = normalizeComment(comment);
+  if (!normalized) return false;
+  const upper = normalized.toUpperCase();
+  return (
+    EXCLUDED_COMMENTS.has(upper) ||
+    upper.startsWith("DNP") ||
+    upper.startsWith("DND") ||
+    upper.startsWith("NWT")
+  );
+}
+
+function isZeroMinutes(minutes: unknown): boolean {
+  if (minutes === null || minutes === undefined) return false;
+
+  if (typeof minutes === "number") {
+    return Number.isFinite(minutes) && minutes === 0;
+  }
+
+  if (typeof minutes !== "string") return false;
+
+  const trimmed = minutes.trim();
+  if (!trimmed) return false;
+
+  if (trimmed === "0" || trimmed === "0.0" || trimmed === "0.00") {
+    return true;
+  }
+
+  if (trimmed.includes(":")) {
+    const [mins, secs] = trimmed.split(":");
+    const minNum = Number(mins);
+    const secNum = Number(secs);
+    if (Number.isFinite(minNum) && Number.isFinite(secNum)) {
+      return minNum === 0 && secNum === 0;
+    }
+  }
+
+  const parsed = Number(trimmed);
+  return Number.isFinite(parsed) && parsed === 0;
 }
 
 function toNumber(value: unknown): number | null {
@@ -250,6 +305,7 @@ async function fetchRecentAverages(
   averages: PlayerAverages;
   games: GameStat[];
   allGames: GameStat[];
+  missedGames: MissedGame[];
 }> {
   const numericId = Number(playerId);
   const emptyAverages = (): PlayerAverages => ({
@@ -290,13 +346,14 @@ async function fetchRecentAverages(
       averages: emptyAverages(),
       games: [],
       allGames: [],
+      missedGames: [],
     };
   }
 
   const { data, error } = await supabase
     .from("pergame_player_base_stats_2025_26")
     .select(
-      "pts, reb, ast, stl, blk, tov, game_date, comment, team_abbr, matchup"
+      "pts, reb, ast, stl, blk, tov, game_date, comment, team_abbr, matchup, min"
     )
     .eq("player_id", numericId)
     .order("game_date", { ascending: false })
@@ -308,19 +365,35 @@ async function fetchRecentAverages(
       averages: emptyAverages(),
       games: [],
       allGames: [],
+      missedGames: [],
     };
   }
 
   const stats = (data ?? []).filter((row) => row !== null);
-  const filteredStats = stats.filter(
-    (row) => !shouldExcludeByComment((row as any).comment)
-  );
+  const isMissedGame = (row: any) =>
+    shouldExcludeByComment((row as any).comment) ||
+    isZeroMinutes((row as any).min);
+  const missedGameRows = stats.filter(isMissedGame);
+  const filteredStats = stats.filter((row) => !isMissedGame(row));
 
   if (!filteredStats.length) {
     return {
       averages: emptyAverages(),
       games: [],
       allGames: [],
+      missedGames: missedGameRows.map((row) => ({
+        game_date: (row as any).game_date,
+        reason:
+          normalizeComment((row as any).comment) ??
+          (isZeroMinutes((row as any).min) ? "0 minutes played" : "Unavailable"),
+        minutes: (row as any).min,
+        team_abbr: (row as any).team_abbr,
+        matchup: (row as any).matchup,
+        opponent: getOpponentLabel(
+          (row as any).matchup,
+          (row as any).team_abbr
+        ),
+      })),
     };
   }
 
@@ -346,6 +419,7 @@ async function fetchRecentAverages(
       blk,
       tov,
       pra: computePra(pts, reb, ast),
+      minutes: (row as any).min ?? null,
       team_abbr: teamAbbr,
       matchup,
       opponent: getOpponentLabel(matchup, teamAbbr),
@@ -354,6 +428,22 @@ async function fetchRecentAverages(
 
   const recentGames: GameStat[] = fiveGameRows.map(mapRowToGame);
   const allGames: GameStat[] = seasonRows.map(mapRowToGame);
+  const missedGames: MissedGame[] = missedGameRows.map((row) => {
+    const teamAbbr = (row as any).team_abbr as string | null;
+    const matchup = (row as any).matchup as string | null;
+    const comment = (row as any).comment;
+
+    return {
+      game_date: (row as any).game_date,
+      reason:
+        normalizeComment(comment) ??
+        (isZeroMinutes((row as any).min) ? "0 minutes played" : "Unavailable"),
+      minutes: (row as any).min,
+      team_abbr: teamAbbr,
+      matchup,
+      opponent: getOpponentLabel(matchup, teamAbbr),
+    };
+  });
 
   return {
     averages: {
@@ -363,6 +453,7 @@ async function fetchRecentAverages(
     },
     games: recentGames,
     allGames,
+    missedGames,
   };
 }
 
@@ -375,7 +466,7 @@ export default async function PlayerAnalysisPage({
     fetchRecentAverages(playerId),
   ]);
 
-  const { averages, games, allGames } = statBundle;
+  const { averages, games, allGames, missedGames } = statBundle;
   const displayName =
     profile?.player_name ?? `Player #${playerId}`;
   const displayTeam = profile?.team ?? "Team TBD";
@@ -597,6 +688,44 @@ export default async function PlayerAnalysisPage({
                 )}
               </div>
             </details>
+          </div>
+
+          <div className="mt-8 rounded-xl border border-amber-500/30 bg-amber-500/5 p-4">
+            <p className="text-xs uppercase tracking-wide text-amber-300">
+              Missed games
+            </p>
+            {missedGames.length === 0 && (
+              <p className="mt-2 text-xs text-amber-200/80">
+                No missed games recorded for this season.
+              </p>
+            )}
+            {missedGames.length > 0 && (
+              <div className="mt-3 space-y-2 text-xs text-amber-100">
+                {missedGames.map((game, idx) => (
+                  <div
+                    key={`${game.game_date ?? idx}-missed`}
+                    className="rounded-lg border border-amber-400/30 bg-amber-400/10 p-3"
+                  >
+                    <div className="flex items-center justify-between text-[11px] text-amber-200/80 mb-1">
+                      <span>
+                        {formatGameDate(game.game_date)}
+                        {game.opponent
+                          ? ` · ${game.opponent}`
+                          : game.matchup
+                          ? ` · ${game.matchup}`
+                          : ""}
+                      </span>
+                      <span className="rounded-full border border-amber-300/40 bg-amber-300/10 px-2 py-0.5 text-[10px] uppercase tracking-wide text-amber-200">
+                        DNP
+                      </span>
+                    </div>
+                    <p className="text-sm font-semibold text-amber-100">
+                      {game.reason}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </section>
 

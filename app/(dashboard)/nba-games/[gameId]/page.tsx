@@ -102,21 +102,6 @@ function isFutureGame(game: Game) {
   return true;
 }
 
-function isPastGame(game: Game) {
-  const gameDayKey = game.game_date?.trim() ?? null;
-  if (gameDayKey && /^\d{4}-\d{2}-\d{2}$/.test(gameDayKey)) {
-    const todayKey = new Date().toISOString().split("T")[0];
-    return gameDayKey < todayKey;
-  }
-  const dt = getGameDate(game);
-  if (!dt) return false;
-  const startOfToday = new Date();
-  startOfToday.setHours(0, 0, 0, 0);
-  const gameDay = new Date(dt);
-  gameDay.setHours(0, 0, 0, 0);
-  return gameDay < startOfToday;
-}
-
 function isWithinAiWindow(game: Game) {
   const gameDayKey = game.game_date?.trim() ?? null;
   const today = new Date();
@@ -131,7 +116,7 @@ function isWithinAiWindow(game: Game) {
   const diffDays =
     (gameDate.setHours(0, 0, 0, 0) - today.getTime()) /
     (1000 * 60 * 60 * 24);
-  return diffDays >= -3 && diffDays <= 3;
+  return diffDays >= 0 && diffDays <= 3;
 }
 
 type PageProps = {

@@ -156,17 +156,17 @@ export function RosterGrid({
                       <div className="flex flex-wrap items-center gap-2">
                         {player.player_id ? (
                           <>
+                                                        {isInjured && (
+                              <span className="inline-flex items-center justify-center rounded-full border border-amber-400/60 bg-amber-500/10 px-3 py-1 text-[9px] font-semibold text-amber-200">
+                                Potential Injury or Low Minutes
+                              </span>
+                            )}
                             <Link
                               href={`/nba-games/players/${player.player_id}`}
-                              className="inline-flex items-center justify-center rounded-full border border-cyan-400/60 bg-cyan-500/10 px-3 py-1 text-[11px] font-semibold text-cyan-200 hover:bg-cyan-500/20 transition"
+                              className="inline-flex items-center justify-center rounded-full border border-cyan-400/60 bg-cyan-500/10 px-3 py-1 text-[9px] font-semibold text-cyan-200 hover:bg-cyan-500/20 transition"
                             >
                               Player Deep Dive
                             </Link>
-                            {isInjured && (
-                              <span className="inline-flex items-center justify-center rounded-full border border-amber-400/60 bg-amber-500/10 px-3 py-1 text-[11px] font-semibold text-amber-200">
-                                Potential Injury
-                              </span>
-                            )}
                           </>
                         ) : (
                           <button

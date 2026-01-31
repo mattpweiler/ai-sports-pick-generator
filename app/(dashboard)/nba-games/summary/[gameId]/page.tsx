@@ -1,13 +1,16 @@
 "use client";
 
 import Link from "next/link";
-import { use, useEffect, useMemo, useState } from "react";
+import { use, useEffect, useMemo, useState, FormEvent } from "react";
 import {
   RosterGrid,
   TeamBadge,
   type PlayerSummary,
   type TeamRoster,
 } from "../../components/RosterGrid";
+import { DEFAULT_MODEL_VERSION } from "@/lib/predictions";
+import type { AiGameProjectionsResponse } from "@/lib/aiPredictions";
+import { ExplanationCell } from "../../../components/ExplanationCell";
 
 type Game = {
   game_id: number;
@@ -162,6 +165,11 @@ export default function GameSummaryPage({ params }: PageProps) {
   >({});
   const [priorDnpInjuries, setPriorDnpInjuries] = useState<PriorInjury[]>([]);
   const [loadingInjuries, setLoadingInjuries] = useState(false);
+  const [showAiPanel, setShowAiPanel] = useState(false);
+  const [aiContext, setAiContext] = useState("");
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiError, setAiError] = useState<string | null>(null);
+  const [aiResult, setAiResult] = useState<AiGameProjectionsResponse | null>(null);
 
   const notableInjuries = useMemo(() => {
     const items: { player_name: string; team_abbr: string | null; note?: string }[] = [];
@@ -398,6 +406,63 @@ function getTeamAbbr(teamId: number | null | undefined) {
   return team ? team.abbreviation : null;
 }
 
+function getPlayerNameFromRoster(
+  roster: TeamRoster[],
+  playerId: number | null | undefined
+) {
+  if (!playerId) return "Unknown player";
+  for (const team of roster) {
+    const match = team.players.find((p) => p.player_id === playerId);
+    if (match) return match.player_name ?? `Player ${playerId}`;
+  }
+  return `Player ${playerId}`;
+}
+
+  const aiGrouped = useMemo(() => {
+    if (!aiResult) return {};
+    return aiResult.players.reduce<Record<string, typeof aiResult.players>>(
+      (acc, player) => {
+        const key = player.team_abbr || "UNK";
+        if (!acc[key]) acc[key] = [];
+        acc[key].push(player);
+        return acc;
+      },
+      {}
+    );
+  }, [aiResult]);
+
+  async function handleGenerateAi(evt?: FormEvent<HTMLFormElement>) {
+    if (evt) evt.preventDefault();
+    if (!game) {
+      setAiError("Load game before generating predictions.");
+      return;
+    }
+    setAiLoading(true);
+    setAiError(null);
+    try {
+      const res = await fetch("/api/ai/game-projections", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          game_id: game.game_id,
+          model_version: DEFAULT_MODEL_VERSION,
+          user_notes: aiContext,
+        }),
+      });
+      const json: AiGameProjectionsResponse | { error?: string } = await res.json();
+      if (!res.ok) {
+        throw new Error((json as any).error || "Failed to generate AI output.");
+      }
+      setAiResult(json as AiGameProjectionsResponse);
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : "Failed to generate AI output.";
+      setAiError(message);
+    } finally {
+      setAiLoading(false);
+    }
+  }
+
   return (
     <div className="min-h-screen bg-gradient-to-b from-black via-slate-900 to-slate-950 text-slate-50">
       <header className="border-b border-slate-800 bg-slate-950/80">
@@ -447,6 +512,196 @@ function getTeamAbbr(teamId: number | null | undefined) {
                 <span className="text-slate-400">at</span>
                 <TeamBadge label={getTeamName(game.home_team_id)} />
               </div>
+            </div>
+          </div>
+        )}
+
+        <div className="flex">
+          <button
+            type="button"
+            onClick={() => setShowAiPanel(true)}
+            className="rounded-full border border-cyan-500/60 bg-cyan-500/10 px-4 py-2 text-[11px] font-semibold text-cyan-100 shadow-cyan-500/30 transition hover:bg-cyan-500/20"
+          >
+            Generate AI Powered Predictions
+          </button>
+        </div>
+
+        {showAiPanel && (
+          <div className="rounded-2xl border border-cyan-500/40 bg-slate-950/70 p-4">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <p className="text-xs uppercase tracking-wide text-cyan-300">
+                  AI Predictions
+                </p>
+                <h2 className="text-lg font-semibold text-slate-50">
+                  Describe game context for Game #{resolvedParams?.gameId ?? "—"}
+                </h2>
+                <p className="text-sm text-slate-300">
+                  Add plain-english notes about injuries, roles, pace, or matchup context to guide projections.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowAiPanel(false)}
+                className="rounded-full border border-slate-700 bg-slate-800/70 px-3 py-1 text-xs font-semibold text-slate-200 hover:border-slate-500"
+                disabled={aiLoading}
+              >
+                Close
+              </button>
+            </div>
+            <form className="mt-4 space-y-3" onSubmit={handleGenerateAi}>
+              <label className="text-xs font-semibold uppercase tracking-wide text-slate-300">
+                Context (injuries/news/trends) <span className="text-slate-500">(optional)</span>
+              </label>
+              <textarea
+                value={aiContext}
+                onChange={(e) => setAiContext(e.target.value)}
+                rows={4}
+                className="mt-2 w-full rounded-xl border border-slate-800 bg-slate-900/70 p-3 text-sm text-slate-100 focus:border-cyan-400 focus:outline-none"
+                placeholder="Giannis questionable ankle; coach said minutes limit; Bucks on B2B; team playing faster lately; role changes…"
+              />
+              <p className="mt-1 text-[11px] text-slate-400">
+                These notes will feed into the AI-generated projections.
+              </p>
+              {aiError && (
+                <div className="rounded-xl border border-red-600/50 bg-red-900/40 px-3 py-2 text-sm text-red-100">
+                  {aiError}
+                </div>
+              )}
+              <div className="flex items-center justify-end gap-3">
+                {aiLoading && (
+                  <span className="text-[11px] text-cyan-200">Generating…</span>
+                )}
+                <button
+                  type="submit"
+                  disabled={aiLoading}
+                  className={[
+                    "rounded-full border border-cyan-500/60 px-4 py-2 text-[11px] font-semibold shadow-cyan-500/30 transition",
+                    aiLoading
+                      ? "bg-cyan-900/50 text-cyan-200"
+                      : "bg-cyan-500/10 text-cyan-100 hover:bg-cyan-500/20",
+                  ].join(" ")}
+                >
+                  {aiLoading ? "Generating…" : "Generate the Predictions"}
+                </button>
+              </div>
+            </form>
+          </div>
+        )}
+
+        {aiResult && (
+          <div className="space-y-3 rounded-2xl border border-cyan-500/30 bg-slate-950/60 p-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-xs uppercase tracking-wide text-cyan-300">
+                  AI Predictions
+                </p>
+                <p className="text-sm text-slate-300">
+                  Model {aiResult.model_version} •{" "}
+                  {new Date(aiResult.generated_at).toLocaleString()}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowAiPanel(true);
+                }}
+                className="text-[11px] font-semibold text-cyan-200 underline-offset-2 hover:underline"
+              >
+                Regenerate
+              </button>
+            </div>
+
+            {aiResult.assumptions?.length ? (
+              <div className="flex flex-wrap gap-2">
+                {aiResult.assumptions.map((a: string, idx: number) => (
+                  <span
+                    key={`${a}-${idx}`}
+                    className="rounded-full border border-slate-700 bg-slate-800/60 px-3 py-1 text-[11px] text-slate-200"
+                  >
+                    {a}
+                  </span>
+                ))}
+              </div>
+            ) : null}
+
+            <div className="space-y-4">
+              {Object.entries(aiGrouped).map(([team, players]) => (
+                <div
+                  key={team}
+                  className="rounded-xl border border-slate-800 bg-slate-900/60 p-3"
+                >
+                  <div className="mb-2 flex items-center justify-between">
+                    <p className="text-sm font-semibold text-cyan-200">
+                      {team}
+                    </p>
+                    <span className="text-[11px] text-slate-400">
+                      {players.length} player{players.length > 1 ? "s" : ""}
+                    </span>
+                  </div>
+                  <div className="overflow-x-auto">
+                    <table className="min-w-full text-left text-xs text-slate-200">
+                      <thead>
+                        <tr className="text-[11px] uppercase tracking-wide text-slate-400">
+                          <th className="px-2 py-2">Player</th>
+                          <th className="px-2 py-2 text-right">Min</th>
+                          <th className="px-2 py-2 text-right">PTS</th>
+                          <th className="px-2 py-2 text-right">REB</th>
+                          <th className="px-2 py-2 text-right">AST</th>
+                          <th className="px-2 py-2 text-right">PRA</th>
+                          <th className="px-2 py-2">Explanation</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {players
+                          .slice()
+                          .sort((a, b) => b.final.pra - a.final.pra)
+                          .map((player) => (
+                            <tr
+                              key={`${player.player_id}-${player.team_abbr}`}
+                              className="border-t border-slate-800/70 hover:bg-slate-800/40"
+                            >
+                              <td className="px-2 py-2 font-semibold text-slate-100">
+                                {getPlayerNameFromRoster(
+                                  roster,
+                                  player.player_id
+                                )}
+                              </td>
+                              <td className="px-2 py-2 text-right">
+                                {player.final.minutes.toFixed(1)}
+                              </td>
+                              <td className="px-2 py-2 text-right">
+                                {player.final.pts.toFixed(1)}
+                              </td>
+                              <td className="px-2 py-2 text-right">
+                                {player.final.reb.toFixed(1)}
+                              </td>
+                              <td className="px-2 py-2 text-right">
+                                {player.final.ast.toFixed(1)}
+                              </td>
+                              <td className="px-2 py-2 text-right">
+                                {player.final.pra.toFixed(1)}
+                              </td>
+                              <td className="px-2 py-2 align-top">
+                                <ExplanationCell
+                                  gameId={game?.game_id ?? numericGameId}
+                                  playerId={player.player_id}
+                                  playerName={getPlayerNameFromRoster(
+                                    roster,
+                                    player.player_id
+                                  )}
+                                  modelVersion={aiResult.model_version}
+                                  finalStats={player.final}
+                                  userNotes={aiContext}
+                                />
+                              </td>
+                            </tr>
+                          ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              ))}
             </div>
           </div>
         )}

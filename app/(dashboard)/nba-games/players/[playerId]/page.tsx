@@ -37,6 +37,7 @@ type PlayerAverages = {
 };
 
 type GameStat = {
+  game_id?: number | null;
   game_date: string | null;
   pts: number | null;
   reb: number | null;
@@ -52,6 +53,7 @@ type GameStat = {
 };
 
 type MissedGame = {
+  game_id?: number | null;
   game_date: string | null;
   reason: string;
   minutes?: string | null;
@@ -179,6 +181,186 @@ function getOpponentLabel(matchup: string | null, teamAbbr: string | null) {
     return sep === "@" ? `vs ${left}` : `@ ${left}`;
   }
   return trimmed || null;
+}
+
+type TeamScheduleGame = {
+  game_id: number | null;
+  game_date: string | null;
+  game_status_id: number | null;
+  game_status_text: string | null;
+  home_team_id: number | null;
+  away_team_id: number | null;
+};
+
+function isCompletedScheduleGame(game: TeamScheduleGame, today: Date) {
+  const statusText = (game.game_status_text ?? "").toLowerCase();
+  if (game.game_status_id === 3 || statusText.includes("final")) return true;
+  const gameDate = parseGameDate(game.game_date);
+  if (!gameDate) return false;
+  return gameDate.getTime() < today.getTime();
+}
+
+function buildScheduleOpponentLabel(
+  game: TeamScheduleGame,
+  playerTeamId: number | null,
+  abbrMap: Map<number, string>
+) {
+  const homeAbbr =
+    typeof game.home_team_id === "number"
+      ? abbrMap.get(game.home_team_id) ?? null
+      : null;
+  const awayAbbr =
+    typeof game.away_team_id === "number"
+      ? abbrMap.get(game.away_team_id) ?? null
+      : null;
+
+  if (playerTeamId && homeAbbr && awayAbbr) {
+    if (playerTeamId === game.home_team_id) return `vs ${awayAbbr}`;
+    if (playerTeamId === game.away_team_id) return `@ ${homeAbbr}`;
+  }
+  if (homeAbbr && awayAbbr) {
+    return `${awayAbbr} @ ${homeAbbr}`;
+  }
+  return null;
+}
+
+function buildScheduleMatchup(game: TeamScheduleGame, abbrMap: Map<number, string>) {
+  const homeAbbr =
+    typeof game.home_team_id === "number"
+      ? abbrMap.get(game.home_team_id) ?? null
+      : null;
+  const awayAbbr =
+    typeof game.away_team_id === "number"
+      ? abbrMap.get(game.away_team_id) ?? null
+      : null;
+  if (homeAbbr && awayAbbr) {
+    return `${awayAbbr} @ ${homeAbbr}`;
+  }
+  return null;
+}
+
+async function inferMissedGamesFromSchedule(
+  teamAbbr: string | null,
+  loggedGameIds: Set<number>
+): Promise<MissedGame[]> {
+  if (!teamAbbr) return [];
+
+  const { data: teamRow, error: teamError } = await supabase
+    .from("team_id_to_team")
+    .select("team_id, abbreviation")
+    .eq("abbreviation", teamAbbr)
+    .maybeSingle();
+
+  if (teamError) {
+    console.error("Error fetching team for player schedule:", teamError);
+    return [];
+  }
+
+  const playerTeamId =
+    teamRow && typeof (teamRow as any).team_id === "number"
+      ? (teamRow as any).team_id
+      : null;
+  if (!playerTeamId) return [];
+
+  const { data: scheduleData, error: scheduleError } = await supabase
+    .from("nba_games-2025-26")
+    .select(
+      "game_id, game_date, game_status_id, game_status_text, home_team_id, away_team_id"
+    )
+    .or(`home_team_id.eq.${playerTeamId},away_team_id.eq.${playerTeamId}`)
+    .order("game_date", { ascending: false })
+    .limit(90);
+
+  if (scheduleError) {
+    console.error("Error fetching team schedule:", scheduleError);
+    return [];
+  }
+
+  const scheduleRows = (scheduleData ?? []) as TeamScheduleGame[];
+
+  const teamIds = Array.from(
+    new Set(
+      scheduleRows
+        .flatMap((row) => [row.home_team_id, row.away_team_id])
+        .filter(
+          (id): id is number =>
+            typeof id === "number" && Number.isFinite(id)
+        )
+    )
+  );
+
+  const abbrMap = new Map<number, string>();
+  if (teamIds.length) {
+    const { data: abbrData, error: abbrError } = await supabase
+      .from("team_id_to_team")
+      .select("team_id, abbreviation")
+      .in("team_id", teamIds);
+
+    if (abbrError) {
+      console.error("Error fetching team abbreviations:", abbrError);
+    } else {
+      (abbrData as any[] | null)?.forEach((row) => {
+        if (
+          row &&
+          typeof row.team_id === "number" &&
+          typeof row.abbreviation === "string"
+        ) {
+          abbrMap.set(row.team_id, row.abbreviation);
+        }
+      });
+    }
+  }
+
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+
+  const inferred = scheduleRows
+    .filter((game) => isCompletedScheduleGame(game, today))
+    .map((game) => {
+      const rawId =
+        typeof game.game_id === "number"
+          ? game.game_id
+          : Number(game.game_id);
+      const gameId = Number.isFinite(rawId) ? Number(rawId) : null;
+      return { game, gameId };
+    })
+    .filter(({ gameId }) => gameId !== null && !loggedGameIds.has(gameId!))
+    .map(({ game, gameId }): MissedGame => {
+      const matchup = buildScheduleMatchup(game, abbrMap);
+      return {
+        game_id: gameId,
+        game_date: game.game_date,
+        reason: "No box score found for this game - possibly injury or 0 minutes",
+        team_abbr: teamAbbr,
+        matchup,
+        opponent: buildScheduleOpponentLabel(
+          game,
+          playerTeamId,
+          abbrMap
+        ),
+      };
+    });
+
+  return inferred;
+}
+
+function dedupeMissedGames(games: MissedGame[]): MissedGame[] {
+  const seen = new Set<number>();
+  const result: MissedGame[] = [];
+
+  games.forEach((game) => {
+    const idVal =
+      typeof (game as any).game_id === "number"
+        ? (game as any).game_id
+        : toNumber((game as any).game_id);
+    if (typeof idVal === "number" && Number.isFinite(idVal)) {
+      if (seen.has(idVal)) return;
+      seen.add(idVal);
+    }
+    result.push(game);
+  });
+
+  return result;
 }
 
 function summarizeAverages(rows: any[]): SampledAverages {
@@ -353,7 +535,7 @@ async function fetchRecentAverages(
   const { data, error } = await supabase
     .from("pergame_player_base_stats_2025_26")
     .select(
-      "pts, reb, ast, stl, blk, tov, game_date, comment, team_abbr, matchup, min"
+      "pts, reb, ast, stl, blk, tov, game_date, comment, team_abbr, matchup, min, game_id"
     )
     .eq("player_id", numericId)
     .order("game_date", { ascending: false })
@@ -411,6 +593,12 @@ async function fetchRecentAverages(
     const teamAbbr = (row as any).team_abbr as string | null;
     const matchup = (row as any).matchup as string | null;
     return {
+      game_id:
+        typeof (row as any).game_id === "number"
+          ? (row as any).game_id
+          : Number.isFinite(Number((row as any).game_id))
+          ? Number((row as any).game_id)
+          : null,
       game_date: (row as any).game_date,
       pts,
       reb,
@@ -434,6 +622,12 @@ async function fetchRecentAverages(
     const comment = (row as any).comment;
 
     return {
+      game_id:
+        typeof (row as any).game_id === "number"
+          ? (row as any).game_id
+          : Number.isFinite(Number((row as any).game_id))
+          ? Number((row as any).game_id)
+          : null,
       game_date: (row as any).game_date,
       reason:
         normalizeComment(comment) ??
@@ -486,6 +680,30 @@ export default async function PlayerAnalysisPage({
     sampleSize
       ? `Based on ${sampleSize} game${sampleSize === 1 ? "" : "s"}`
       : "No recent games recorded";
+  const loggedGameIds = new Set<number>();
+  allGames.forEach((game) => {
+    const idVal = toNumber((game as any).game_id);
+    if (idVal !== null) loggedGameIds.add(idVal);
+  });
+  const inferredMissed = await inferMissedGamesFromSchedule(
+    profile?.team_abbr ?? allGames[0]?.team_abbr ?? null,
+    loggedGameIds
+  );
+  const combinedMissedGames = dedupeMissedGames([
+    ...missedGames,
+    ...inferredMissed,
+  ]);
+  const totalGamesLogged = allGames.length;
+  const totalMissedCount = combinedMissedGames.length;
+  const hasRecentDnp = combinedMissedGames.some((game) => {
+    const dt = parseGameDate(game.game_date);
+    if (!dt) return false;
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const diffDays =
+      (today.getTime() - dt.getTime()) / (1000 * 60 * 60 * 24);
+    return diffDays >= 0 && diffDays <= 5;
+  });
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-black via-slate-900 to-slate-950 text-slate-50">
@@ -496,6 +714,21 @@ export default async function PlayerAnalysisPage({
         >
           ← Back to NBA Games
         </Link>
+
+        {hasRecentDnp && (
+          <div className="flex items-center gap-3 rounded-xl border border-amber-400/50 bg-amber-500/10 p-4 text-sm text-amber-100 shadow-[0_0_0_1px_rgba(251,191,36,0.2)]">
+            <div className="h-2 w-2 rounded-full bg-amber-300 animate-pulse" />
+            <div className="flex flex-col">
+              <span className="text-xs uppercase tracking-wide text-amber-300">
+                Current Player Injury Detected
+              </span>
+              <span className="text-amber-100/90">
+                Recent DNP recorded within the last 5 days. Check availability
+                before making picks.
+              </span>
+            </div>
+          </div>
+        )}
 
         <section className="rounded-2xl border border-cyan-500/30 bg-slate-950/70 p-6 shadow-2xl shadow-black/40">
           <p className="text-xs uppercase tracking-wide text-cyan-300 mb-2">
@@ -650,9 +883,16 @@ export default async function PlayerAnalysisPage({
             <details className="group">
               <summary className="flex cursor-pointer items-center justify-between text-xs font-semibold uppercase tracking-wide text-cyan-200">
                 <span>Full Season Game Log</span>
-                <span className="rounded-full border border-cyan-500/40 bg-cyan-500/10 px-2 py-0.5 text-[11px] text-cyan-200">
-                  {averages.season.sampleSize} total game
-                  {averages.season.sampleSize === 1 ? "" : "s"}
+                <span className="flex items-center gap-2">
+                  <span className="rounded-full border border-cyan-500/40 bg-cyan-500/10 px-2 py-0.5 text-[11px] text-cyan-200">
+                    {totalGamesLogged} game{totalGamesLogged === 1 ? "" : "s"} logged
+                  </span>
+                  {totalMissedCount > 0 && (
+                    <span className="rounded-full border border-amber-300/40 bg-amber-300/10 px-2 py-0.5 text-[11px] text-amber-200">
+                      {totalMissedCount} missed
+                      {totalMissedCount === 1 ? "" : " games"}
+                    </span>
+                  )}
                 </span>
               </summary>
               <div className="mt-4 space-y-2 text-xs text-slate-200">
@@ -694,34 +934,36 @@ export default async function PlayerAnalysisPage({
             <p className="text-xs uppercase tracking-wide text-amber-300">
               Missed games
             </p>
-            {missedGames.length === 0 && (
+            {combinedMissedGames.length === 0 && (
               <p className="mt-2 text-xs text-amber-200/80">
                 No missed games recorded for this season.
               </p>
             )}
-            {missedGames.length > 0 && (
+            {combinedMissedGames.length > 0 && (
               <div className="mt-3 space-y-2 text-xs text-amber-100">
-                {missedGames.map((game, idx) => (
+                {combinedMissedGames.map((game, idx) => (
                   <div
-                    key={`${game.game_date ?? idx}-missed`}
+                    key={`${game.game_id ?? game.game_date ?? idx}-missed`}
                     className="rounded-lg border border-amber-400/30 bg-amber-400/10 p-3"
                   >
-                    <div className="flex items-center justify-between text-[11px] text-amber-200/80 mb-1">
-                      <span>
-                        {formatGameDate(game.game_date)}
-                        {game.opponent
-                          ? ` · ${game.opponent}`
-                          : game.matchup
-                          ? ` · ${game.matchup}`
-                          : ""}
-                      </span>
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="space-y-1">
+                        <div className="text-[11px] text-amber-200/80">
+                          {formatGameDate(game.game_date)}
+                          {game.opponent
+                            ? ` · ${game.opponent}`
+                            : game.matchup
+                            ? ` · ${game.matchup}`
+                            : ""}
+                        </div>
+                        <div className="text-sm font-semibold text-amber-100">
+                          {game.reason}
+                        </div>
+                      </div>
                       <span className="rounded-full border border-amber-300/40 bg-amber-300/10 px-2 py-0.5 text-[10px] uppercase tracking-wide text-amber-200">
                         DNP
                       </span>
                     </div>
-                    <p className="text-sm font-semibold text-amber-100">
-                      {game.reason}
-                    </p>
                   </div>
                 ))}
               </div>

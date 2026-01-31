@@ -1,7 +1,7 @@
 "use client";
 
+import React, { use, useEffect, useMemo, useState, FormEvent } from "react";
 import Link from "next/link";
-import { use, useEffect, useMemo, useState, FormEvent } from "react";
 import {
   RosterGrid,
   TeamBadge,
@@ -406,6 +406,15 @@ function getTeamAbbr(teamId: number | null | undefined) {
   return team ? team.abbreviation : null;
 }
 
+function getTeamIdByAbbr(roster: TeamRoster[], abbr?: string | null) {
+  if (!abbr) return null;
+  const target = abbr.toUpperCase();
+  for (const team of roster) {
+    if ((team.team_abbr ?? "").toUpperCase() === target) return team.team_id;
+  }
+  return null;
+}
+
 function getPlayerNameFromRoster(
   roster: TeamRoster[],
   playerId: number | null | undefined
@@ -430,6 +439,38 @@ function getPlayerNameFromRoster(
       {}
     );
   }, [aiResult]);
+
+  const aiTeamsSplit = useMemo(() => {
+    if (!aiResult) return { home: [], away: [], others: [] as typeof aiResult.players };
+    const homeAbbr = (getTeamAbbr(game?.home_team_id) ?? "HOME").toUpperCase();
+    const awayAbbr = (getTeamAbbr(game?.away_team_id) ?? "AWAY").toUpperCase();
+    const home: typeof aiResult.players = [];
+    const away: typeof aiResult.players = [];
+    const others: typeof aiResult.players = [];
+    aiResult.players.forEach((p) => {
+      const abbr = (p.team_abbr ?? "").toUpperCase();
+      if (abbr === homeAbbr) home.push(p);
+      else if (abbr === awayAbbr) away.push(p);
+      else others.push(p);
+    });
+    return { home, away, others };
+  }, [aiResult, game, teams]);
+
+  useEffect(() => {
+    if (!aiResult || !roster.length) return;
+    aiResult.players.forEach((player) => {
+      const teamId = getTeamIdByAbbr(roster, player.team_abbr);
+      const key = buildPlayerKey(
+        numericGameId,
+        "stats",
+        player.player_id,
+        teamId ?? player.team_abbr
+      );
+      if (!playerSummaries[key] && !playerSummaryLoading[key]) {
+        loadPlayerSummary(player.player_id, key);
+      }
+    });
+  }, [aiResult, roster, numericGameId, playerSummaries, playerSummaryLoading]);
 
   async function handleGenerateAi(evt?: FormEvent<HTMLFormElement>) {
     if (evt) evt.preventDefault();
@@ -594,7 +635,7 @@ function getPlayerNameFromRoster(
             <div className="flex items-center justify-between">
               <div>
                 <p className="text-xs uppercase tracking-wide text-cyan-300">
-                  AI Predictions
+                  AI Projections vs Form
                 </p>
                 <p className="text-sm text-slate-300">
                   Model {aiResult.model_version} •{" "}
@@ -625,83 +666,148 @@ function getPlayerNameFromRoster(
               </div>
             ) : null}
 
-            <div className="space-y-4">
-              {Object.entries(aiGrouped).map(([team, players]) => (
-                <div
-                  key={team}
-                  className="rounded-xl border border-slate-800 bg-slate-900/60 p-3"
-                >
-                  <div className="mb-2 flex items-center justify-between">
-                    <p className="text-sm font-semibold text-cyan-200">
-                      {team}
-                    </p>
-                    <span className="text-[11px] text-slate-400">
-                      {players.length} player{players.length > 1 ? "s" : ""}
-                    </span>
-                  </div>
-                  <div className="overflow-x-auto">
-                    <table className="min-w-full text-left text-xs text-slate-200">
-                      <thead>
-                        <tr className="text-[11px] uppercase tracking-wide text-slate-400">
-                          <th className="px-2 py-2">Player</th>
-                          <th className="px-2 py-2 text-right">Min</th>
-                          <th className="px-2 py-2 text-right">PTS</th>
-                          <th className="px-2 py-2 text-right">REB</th>
-                          <th className="px-2 py-2 text-right">AST</th>
-                          <th className="px-2 py-2 text-right">PRA</th>
-                          <th className="px-2 py-2">Explanation</th>
+            <div className="overflow-x-auto rounded-xl border border-slate-800 bg-slate-900/60 p-3">
+              <div className="mb-2 flex items-center justify-between">
+                <p className="text-sm font-semibold text-cyan-200">
+                  Compare AI line vs Last 5 and Season
+                </p>
+                <span className="text-[11px] text-slate-400">
+                  AI blends context; L5 shows momentum; season is baseline.
+                </span>
+              </div>
+              <p className="mb-2 text-[12px] text-slate-300">
+                Click “Generate explanation” by a player to see a short rationale below their row.
+              </p>
+              <table className="min-w-full text-left text-[11px] text-slate-200">
+                <thead>
+                  <tr className="uppercase tracking-wide text-slate-400">
+                    <th className="px-2 py-2" />
+                    <th className="px-2 py-2 text-center bg-cyan-900/60 text-cyan-100" colSpan={5}>
+                      AI Projection (today&apos;s context)
+                    </th>
+                    <th className="px-2 py-2 text-center bg-amber-900/50 text-amber-100 border-l border-amber-500/30" colSpan={4}>
+                      Last 5 Games (momentum)
+                    </th>
+                    <th className="px-2 py-2 text-center bg-indigo-900/50 text-indigo-100 border-l border-indigo-500/30" colSpan={4}>
+                      Season Average (baseline)
+                    </th>
+                  </tr>
+                  <tr className="uppercase tracking-wide text-slate-400">
+                    <th className="px-2 py-2">Player</th>
+                    <th className="px-2 py-2 text-right bg-cyan-900/30 text-cyan-100">Min</th>
+                    <th className="px-2 py-2 text-right bg-cyan-900/30 text-cyan-100">PTS</th>
+                    <th className="px-2 py-2 text-right bg-cyan-900/30 text-cyan-100">REB</th>
+                    <th className="px-2 py-2 text-right bg-cyan-900/30 text-cyan-100">AST</th>
+                    <th className="px-2 py-2 text-right bg-cyan-900/30 text-cyan-100">PRA</th>
+                    <th className="px-2 py-2 text-right border-l border-amber-500/30 bg-amber-900/25 text-amber-100">
+                      PTS
+                    </th>
+                    <th className="px-2 py-2 text-right bg-amber-900/25 text-amber-100">REB</th>
+                    <th className="px-2 py-2 text-right bg-amber-900/25 text-amber-100">AST</th>
+                    <th className="px-2 py-2 text-right bg-amber-900/25 text-amber-100">PRA</th>
+                    <th className="px-2 py-2 text-right border-l border-indigo-500/30 bg-indigo-900/25 text-indigo-100">
+                      PTS
+                    </th>
+                    <th className="px-2 py-2 text-right bg-indigo-900/25 text-indigo-100">REB</th>
+                    <th className="px-2 py-2 text-right bg-indigo-900/25 text-indigo-100">AST</th>
+                    <th className="px-2 py-2 text-right bg-indigo-900/25 text-indigo-100">PRA</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {[
+                    { label: `Home (${getTeamAbbr(game?.home_team_id) ?? "Home"})`, list: aiTeamsSplit.home },
+                    { label: `Away (${getTeamAbbr(game?.away_team_id) ?? "Away"})`, list: aiTeamsSplit.away },
+                    { label: "Other", list: aiTeamsSplit.others },
+                  ]
+                    .filter((group) => group.list.length > 0)
+                    .map((group) => (
+                      <React.Fragment key={group.label}>
+                        <tr className="border-t border-slate-800/70 bg-slate-900/70">
+                          <td className="px-2 py-2 text-[11px] font-semibold text-slate-200" colSpan={14}>
+                            {group.label}
+                          </td>
                         </tr>
-                      </thead>
-                      <tbody>
-                        {players
+                        {group.list
                           .slice()
                           .sort((a, b) => b.final.pra - a.final.pra)
-                          .map((player) => (
-                            <tr
-                              key={`${player.player_id}-${player.team_abbr}`}
-                              className="border-t border-slate-800/70 hover:bg-slate-800/40"
-                            >
-                              <td className="px-2 py-2 font-semibold text-slate-100">
-                                {getPlayerNameFromRoster(
-                                  roster,
-                                  player.player_id
-                                )}
-                              </td>
-                              <td className="px-2 py-2 text-right">
-                                {player.final.minutes.toFixed(1)}
-                              </td>
-                              <td className="px-2 py-2 text-right">
-                                {player.final.pts.toFixed(1)}
-                              </td>
-                              <td className="px-2 py-2 text-right">
-                                {player.final.reb.toFixed(1)}
-                              </td>
-                              <td className="px-2 py-2 text-right">
-                                {player.final.ast.toFixed(1)}
-                              </td>
-                              <td className="px-2 py-2 text-right">
-                                {player.final.pra.toFixed(1)}
-                              </td>
-                              <td className="px-2 py-2 align-top">
-                                <ExplanationCell
-                                  gameId={game?.game_id ?? numericGameId}
-                                  playerId={player.player_id}
-                                  playerName={getPlayerNameFromRoster(
-                                    roster,
-                                    player.player_id
-                                  )}
-                                  modelVersion={aiResult.model_version}
-                                  finalStats={player.final}
-                                  userNotes={aiContext}
-                                />
-                              </td>
-                            </tr>
-                          ))}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-              ))}
+                          .map((player) => {
+                            const teamId = getTeamIdByAbbr(roster, player.team_abbr);
+                            const key = buildPlayerKey(
+                              numericGameId,
+                              "stats",
+                              player.player_id,
+                              teamId ?? player.team_abbr
+                            );
+                            const summary = playerSummaries[key];
+                            const format = (value: number | null | undefined) =>
+                              value === null || value === undefined
+                                ? "—"
+                                : Number(value).toFixed(1);
+                            return (
+                              <tr
+                                key={`form-${player.player_id}-${player.team_abbr}`}
+                                className="border-t border-slate-800/70 hover:bg-slate-800/40"
+                              >
+                                <td className="px-2 py-2 font-semibold text-slate-100">
+                                  <div className="flex items-center gap-2">
+                                    <span>{getPlayerNameFromRoster(roster, player.player_id)}</span>
+                                    <ExplanationCell
+                                      gameId={game?.game_id ?? numericGameId}
+                                      playerId={player.player_id}
+                                      playerName={getPlayerNameFromRoster(roster, player.player_id)}
+                                      modelVersion={aiResult.model_version}
+                                      finalStats={player.final}
+                                      userNotes={aiContext}
+                                      injuries={priorDnpInjuries}
+                                    />
+                                  </div>
+                                </td>
+                                <td className="px-2 py-2 text-right bg-cyan-900/20">
+                                  {player.final.minutes.toFixed(1)}
+                                </td>
+                                <td className="px-2 py-2 text-right bg-cyan-900/20">
+                                  {player.final.pts.toFixed(1)}
+                                </td>
+                                <td className="px-2 py-2 text-right bg-cyan-900/20">
+                                  {player.final.reb.toFixed(1)}
+                                </td>
+                                <td className="px-2 py-2 text-right bg-cyan-900/20">
+                                  {player.final.ast.toFixed(1)}
+                                </td>
+                                <td className="px-2 py-2 text-right bg-cyan-900/20">
+                                  {player.final.pra.toFixed(1)}
+                                </td>
+                                <td className="px-2 py-2 text-right border-l border-amber-500/30 bg-amber-900/15">
+                                  {format(summary?.pts)}
+                                </td>
+                                <td className="px-2 py-2 text-right bg-amber-900/15">
+                                  {format(summary?.reb)}
+                                </td>
+                                <td className="px-2 py-2 text-right bg-amber-900/15">
+                                  {format(summary?.ast)}
+                                </td>
+                                <td className="px-2 py-2 text-right bg-amber-900/15">
+                                  {format(summary?.pra)}
+                                </td>
+                                <td className="px-2 py-2 text-right border-l border-indigo-500/30 bg-indigo-900/15">
+                                  {format(summary?.seasonPts)}
+                                </td>
+                                <td className="px-2 py-2 text-right bg-indigo-900/15">
+                                  {format(summary?.seasonReb)}
+                                </td>
+                                <td className="px-2 py-2 text-right bg-indigo-900/15">
+                                  {format(summary?.seasonAst)}
+                                </td>
+                                <td className="px-2 py-2 text-right bg-indigo-900/15">
+                                  {format(summary?.seasonPra)}
+                                </td>
+                              </tr>
+                            );
+                          })}
+                      </React.Fragment>
+                    ))}
+                </tbody>
+              </table>
             </div>
           </div>
         )}

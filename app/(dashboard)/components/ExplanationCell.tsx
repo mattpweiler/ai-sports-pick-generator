@@ -15,6 +15,7 @@ type Props = {
     pra: number;
   };
   userNotes: string;
+  injuries?: { player_id: number | null; player_name: string | null; team_abbr: string | null; reason?: string | null }[];
 };
 
 export function ExplanationCell({
@@ -24,6 +25,7 @@ export function ExplanationCell({
   modelVersion,
   finalStats,
   userNotes,
+  injuries,
 }: Props) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -43,6 +45,7 @@ export function ExplanationCell({
           model_version: modelVersion,
           user_notes: userNotes,
           final_stats: finalStats,
+          injuries,
         }),
       });
       const json: { explanation?: string[]; error?: string } = await res.json();
@@ -82,7 +85,7 @@ export function ExplanationCell({
         Generate explanation
       </button>
       <span className="text-[10px] text-slate-500">
-        Uses L5/L10/season, ML means, schedule, notes{playerName ? ` for ${playerName}` : ""}.
+        Uses L5/L10/season, ML means, schedule, notes, and injury minutes{playerName ? ` for ${playerName}` : ""}.
       </span>
     </div>
   );

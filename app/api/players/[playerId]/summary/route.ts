@@ -89,6 +89,11 @@ export async function GET(
           tov: null,
           pra: null,
           sampleSize: 0,
+          seasonPts: null,
+          seasonReb: null,
+          seasonAst: null,
+          seasonPra: null,
+          seasonSampleSize: 0,
         },
       });
     }
@@ -118,6 +123,21 @@ export async function GET(
 
     const divider = recentRows.length;
 
+    let seasonPtsSum = 0;
+    let seasonRebSum = 0;
+    let seasonAstSum = 0;
+
+    filteredRows.forEach((row) => {
+      const pts = toNumber(row.pts);
+      const reb = toNumber(row.reb);
+      const ast = toNumber(row.ast);
+      if (pts !== null) seasonPtsSum += pts;
+      if (reb !== null) seasonRebSum += reb;
+      if (ast !== null) seasonAstSum += ast;
+    });
+
+    const seasonDivider = filteredRows.length;
+
     const summary = {
       pts: average(ptsSum, divider),
       reb: average(rebSum, divider),
@@ -127,6 +147,11 @@ export async function GET(
       tov: average(tovSum, divider),
       pra: average(ptsSum + rebSum + astSum, divider),
       sampleSize: recentRows.length,
+      seasonPts: average(seasonPtsSum, seasonDivider),
+      seasonReb: average(seasonRebSum, seasonDivider),
+      seasonAst: average(seasonAstSum, seasonDivider),
+      seasonPra: average(seasonPtsSum + seasonRebSum + seasonAstSum, seasonDivider),
+      seasonSampleSize: seasonDivider,
     };
 
     return NextResponse.json({ summary });

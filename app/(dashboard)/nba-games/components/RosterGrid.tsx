@@ -23,6 +23,11 @@ export type PlayerSummary = {
   ast: number | null;
   pra: number | null;
   sampleSize: number;
+  seasonPts?: number | null;
+  seasonReb?: number | null;
+  seasonAst?: number | null;
+  seasonPra?: number | null;
+  seasonSampleSize?: number;
 };
 
 type RosterGridProps = {
